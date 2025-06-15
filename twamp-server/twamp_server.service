@@ -1,13 +1,13 @@
 [Unit]
-Description=TWAMP Light UDP Reflector Server
+Description=TWAMP Light Session Reflector
 After=network.target
 
 [Service]
 Type=forking
 ExecStart=/usr/bin/twamp_server
 PIDFile=/run/twamp_server.pid
-Restart=on-failure
 User=root
+Restart=on-failure
 
 [Install]
 WantedBy=multi-user.target
