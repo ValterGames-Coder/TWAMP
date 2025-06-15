@@ -42,6 +42,7 @@ struct TwampTestResponse {
 #pragma pack(pop)
 
 uint64_t getNtpTimestamp() {
+    using namespace chrono; 
     auto now = system_clock::now();
     auto duration = now.time_since_epoch();
     uint64_t seconds = duration_cast<seconds>(duration).count();
