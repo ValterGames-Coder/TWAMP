@@ -5,8 +5,7 @@ After=network.target
 [Service]
 ExecStart=/usr/local/bin/twamp_server
 Restart=on-failure
-User=nobody
-Group=nogroup
+User=root
 KillSignal=SIGINT
 TimeoutStopSec=5
 
