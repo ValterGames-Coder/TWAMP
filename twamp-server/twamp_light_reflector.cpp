@@ -12,22 +12,24 @@
 
 volatile bool running = true;
 
+#pragma pack(push, 1)
 struct NtpTimestamp {
     uint32_t seconds;
     uint32_t fraction;
-} __attribute__((packed));
+};
 
 struct TwampTestPacket {
     uint32_t seq_num;
-    NtpTimestamp timestamp; // T1: Client send time
-    char payload[56];       // Payload (optional)
-} __attribute__((packed));
+    NtpTimestamp timestamp;
+    char payload[56];
+};
 
 struct TwampReflectPacket {
     uint32_t seq_num;
-    NtpTimestamp timestamp; // T2: Reflector receive time
+    NtpTimestamp timestamp;
     char payload[56];
-} __attribute__((packed));
+};
+#pragma pack(pop)
 
 void handle_signal(int signal) {
     running = false;
@@ -44,7 +46,7 @@ NtpTimestamp get_ntp_time() {
     uint32_t seconds = (uint32_t)(sec + NTP_UNIX_OFFSET);
     uint32_t fraction = (uint32_t)(((uint64_t)nano << 32) / 1'000'000'000);
 
-    return NtpTimestamp{ seconds, fraction };
+    return NtpTimestamp{htonl(seconds), htonl(fraction)};
 }
 
 int main() {
@@ -75,15 +77,22 @@ int main() {
         TwampTestPacket request{};
         ssize_t n = recvfrom(sockfd, &request, sizeof(request), 0,
                              (struct sockaddr *)&cliaddr, &len);
-        if (n < 0) continue;
+
+        if (n != sizeof(request)) {
+            std::cerr << "Received incorrect packet size: " << n << std::endl;
+            continue;
+        }
 
         TwampReflectPacket response{};
-        response.seq_num = request.seq_num;
-        response.timestamp = get_ntp_time();
-        memcpy(response.payload, request.payload, sizeof(response.payload));
+        response.seq_num = request.seq_num; // copy sequence
+        response.timestamp = get_ntp_time(); // server receive timestamp
+        memcpy(response.payload, request.payload, sizeof(request.payload));
 
-        sendto(sockfd, &response, sizeof(response), 0,
-               (const struct sockaddr *)&cliaddr, len);
+        ssize_t sent = sendto(sockfd, &response, sizeof(response), 0,
+                              (const struct sockaddr *)&cliaddr, len);
+        if (sent != sizeof(response)) {
+            std::cerr << "Failed to send response\n";
+        }
     }
 
     close(sockfd);
