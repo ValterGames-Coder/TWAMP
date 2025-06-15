@@ -9,284 +9,248 @@
 #include <signal.h>
 #include <errno.h>
 #include <sys/time.h>
-#include <vector>
-#include <iomanip>
 
-// TWAMP Light Test Packet format (same as reflector)
+// TWAMP Light Test Packet format according to RFC 5357
+// Total size must be exactly 64 bytes
 struct TWAMPTestPacket {
-    uint32_t sequence_number;
-    uint64_t timestamp;
-    uint16_t error_estimate;
-    uint8_t  mbz[2];
-    uint64_t receive_timestamp;
-    uint32_t sender_sequence;
-    uint64_t sender_timestamp;
-    uint16_t sender_error_est;
-    uint8_t  mbz2[2];
-    uint32_t sender_ttl;
-    uint8_t  padding[28];
+    uint32_t sequence_number;    // 4 bytes - Sequence number
+    uint64_t timestamp;          // 8 bytes - Timestamp (NTP format) 
+    uint16_t error_estimate;     // 2 bytes - Error estimate
+    uint8_t  mbz[2];            // 2 bytes - Must be zero
+    uint64_t receive_timestamp;  // 8 bytes - Receive timestamp (for reflector response)
+    uint32_t sender_sequence;    // 4 bytes - Sender sequence number (for reflector response)
+    uint64_t sender_timestamp;   // 8 bytes - Sender timestamp (for reflector response)
+    uint16_t sender_error_est;   // 2 bytes - Sender error estimate (for reflector response)
+    uint8_t  mbz2[2];           // 2 bytes - Must be zero
+    uint32_t sender_ttl;        // 4 bytes - Sender TTL (for reflector response)
+    uint8_t  padding[20];       // 20 bytes - Padding to make exactly 64 bytes total
+    // Total: 4+8+2+2+8+4+8+2+2+4+20 = 64 bytes
 } __attribute__((packed));
 
-struct TestResult {
-    uint32_t sequence;
-    uint64_t send_time;
-    uint64_t receive_time;
-    uint64_t reflect_time;
-    uint64_t return_time;
-    double rtt_ms;
-    bool received;
-};
-
-class TWAMPLightClient {
+class TWAMPLightReflector {
 private:
     int socket_fd;
     struct sockaddr_in server_addr;
-    std::string server_ip;
-    uint16_t server_port;
-    uint32_t sequence_counter;
-    std::vector<TestResult> results;
+    bool running;
+    uint16_t port;
     
+    // Convert system time to NTP timestamp format
     uint64_t getNTPTimestamp() {
         struct timeval tv;
         gettimeofday(&tv, nullptr);
+        
+        // NTP epoch starts Jan 1, 1900, Unix epoch starts Jan 1, 1970
+        // Difference is 70 years = 2208988800 seconds
         const uint64_t NTP_EPOCH_OFFSET = 2208988800ULL;
+        
         uint64_t seconds = tv.tv_sec + NTP_EPOCH_OFFSET;
         uint64_t fraction = ((uint64_t)tv.tv_usec * (1ULL << 32)) / 1000000;
+        
         return (seconds << 32) | fraction;
     }
     
+    // Convert network byte order to host byte order for 64-bit values
     uint64_t ntohll(uint64_t value) {
         return ((uint64_t)ntohl(value & 0xFFFFFFFF) << 32) | ntohl(value >> 32);
     }
     
+    // Convert host byte order to network byte order for 64-bit values
     uint64_t htonll(uint64_t value) {
         return ((uint64_t)htonl(value & 0xFFFFFFFF) << 32) | htonl(value >> 32);
     }
     
-    double ntpTimestampToMs(uint64_t ntp_time) {
-        uint32_t seconds = (ntp_time >> 32) & 0xFFFFFFFF;
-        uint32_t fraction = ntp_time & 0xFFFFFFFF;
-        return (double)seconds * 1000.0 + ((double)fraction * 1000.0) / (1ULL << 32);
-    }
-    
 public:
-    TWAMPLightClient(const std::string& ip, uint16_t port) 
-        : server_ip(ip), server_port(port), sequence_counter(1) {
+    TWAMPLightReflector(uint16_t listen_port = 862) : port(listen_port), running(false) {
         socket_fd = -1;
     }
     
-    ~TWAMPLightClient() {
-        if (socket_fd >= 0) {
-            close(socket_fd);
-        }
+    ~TWAMPLightReflector() {
+        stop();
     }
     
     bool initialize() {
+        // Create UDP socket
         socket_fd = socket(AF_INET, SOCK_DGRAM, 0);
         if (socket_fd < 0) {
             std::cerr << "Error creating socket: " << strerror(errno) << std::endl;
             return false;
         }
         
-        // Set receive timeout
-        struct timeval timeout;
-        timeout.tv_sec = 5;  // 5 second timeout
-        timeout.tv_usec = 0;
-        
-        if (setsockopt(socket_fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) < 0) {
-            std::cerr << "Error setting socket timeout: " << strerror(errno) << std::endl;
+        // Set socket options for reuse
+        int opt = 1;
+        if (setsockopt(socket_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
+            std::cerr << "Error setting socket options: " << strerror(errno) << std::endl;
             close(socket_fd);
             return false;
         }
         
+        // Configure server address
         memset(&server_addr, 0, sizeof(server_addr));
         server_addr.sin_family = AF_INET;
-        server_addr.sin_port = htons(server_port);
+        server_addr.sin_addr.s_addr = INADDR_ANY;
+        server_addr.sin_port = htons(port);
         
-        if (inet_pton(AF_INET, server_ip.c_str(), &server_addr.sin_addr) <= 0) {
-            std::cerr << "Invalid IP address: " << server_ip << std::endl;
+        // Bind socket
+        if (bind(socket_fd, (struct sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
+            std::cerr << "Error binding socket to port " << port << ": " << strerror(errno) << std::endl;
             close(socket_fd);
             return false;
         }
         
-        std::cout << "TWAMP Light Client initialized. Target: " << server_ip << ":" << server_port << std::endl;
+        std::cout << "TWAMP Light Reflector initialized on port " << port << std::endl;
+        std::cout << "TWAMP packet size: " << sizeof(TWAMPTestPacket) << " bytes" << std::endl;
         return true;
     }
     
-    bool sendTestPacket() {
-        TWAMPTestPacket packet;
-        memset(&packet, 0, sizeof(packet));
+    void processTestPacket(const TWAMPTestPacket& received_packet, 
+                          TWAMPTestPacket& response_packet,
+                          uint64_t receive_time) {
         
-        // Fill packet
-        packet.sequence_number = htonl(sequence_counter);
-        packet.timestamp = htonll(getNTPTimestamp());
-        packet.error_estimate = htons(0x0001); // 1 microsecond accuracy
+        // Copy the original packet data to response
+        response_packet = received_packet;
         
-        uint64_t send_time = getNTPTimestamp();
+        // Set receive timestamp (when we received the packet)
+        response_packet.receive_timestamp = htonll(receive_time);
         
-        ssize_t bytes_sent = sendto(socket_fd, &packet, sizeof(packet), 0,
-                                   (struct sockaddr*)&server_addr, sizeof(server_addr));
+        // Copy sender information from received packet
+        response_packet.sender_sequence = received_packet.sequence_number;
+        response_packet.sender_timestamp = received_packet.timestamp;
+        response_packet.sender_error_est = received_packet.error_estimate;
         
-        if (bytes_sent < 0) {
-            std::cerr << "Error sending packet: " << strerror(errno) << std::endl;
-            return false;
-        }
+        // Set sender TTL (simplified - would need IP header inspection for real TTL)
+        response_packet.sender_ttl = htonl(64);
         
-        // Wait for response
-        TWAMPTestPacket response;
-        struct sockaddr_in from_addr;
-        socklen_t from_len = sizeof(from_addr);
+        // Clear MBZ fields
+        memset(response_packet.mbz, 0, sizeof(response_packet.mbz));
+        memset(response_packet.mbz2, 0, sizeof(response_packet.mbz2));
         
-        ssize_t bytes_received = recvfrom(socket_fd, &response, sizeof(response), 0,
-                                         (struct sockaddr*)&from_addr, &from_len);
+        // Update timestamp to current time for response
+        response_packet.timestamp = htonll(getNTPTimestamp());
         
-        uint64_t return_time = getNTPTimestamp();
-        
-        TestResult result;
-        result.sequence = sequence_counter;
-        result.send_time = send_time;
-        result.return_time = return_time;
-        
-        if (bytes_received < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                std::cout << "Packet " << sequence_counter << ": TIMEOUT" << std::endl;
-            } else {
-                std::cout << "Packet " << sequence_counter << ": ERROR - " << strerror(errno) << std::endl;
-            }
-            result.received = false;
-            result.rtt_ms = -1;
-        } else if (bytes_received != sizeof(TWAMPTestPacket)) {
-            std::cout << "Packet " << sequence_counter << ": Invalid response size" << std::endl;
-            result.received = false;
-            result.rtt_ms = -1;
-        } else {
-            result.received = true;
-            result.receive_time = ntohll(response.receive_timestamp);
-            result.reflect_time = ntohll(response.timestamp);
-            
-            // Calculate RTT in milliseconds
-            double send_ms = ntpTimestampToMs(send_time);
-            double return_ms = ntpTimestampToMs(return_time);
-            result.rtt_ms = return_ms - send_ms;
-            
-            uint32_t resp_seq = ntohl(response.sender_sequence);
-            
-            std::cout << "Packet " << sequence_counter 
-                     << ": RTT=" << std::fixed << std::setprecision(3) << result.rtt_ms << "ms"
-                     << " (seq=" << resp_seq << ")" << std::endl;
-        }
-        
-        results.push_back(result);
-        sequence_counter++;
-        return result.received;
+        // Set error estimate (simplified - indicates synchronization quality)
+        response_packet.error_estimate = htons(0x0001); // 1 microsecond accuracy
     }
     
-    void runTest(int count, double interval_sec = 1.0) {
-        std::cout << "\nStarting TWAMP Light test..." << std::endl;
-        std::cout << "Target: " << server_ip << ":" << server_port << std::endl;
-        std::cout << "Packets: " << count << ", Interval: " << interval_sec << "s" << std::endl;
-        std::cout << "---" << std::endl;
-        
-        for (int i = 0; i < count; i++) {
-            sendTestPacket();
-            
-            if (i < count - 1) {
-                std::this_thread::sleep_for(
-                    std::chrono::milliseconds(static_cast<int>(interval_sec * 1000))
-                );
-            }
+    void run() {
+        if (socket_fd < 0) {
+            std::cerr << "Reflector not initialized!" << std::endl;
+            return;
         }
         
-        printStatistics();
+        running = true;
+        std::cout << "TWAMP Light Reflector started. Waiting for test packets..." << std::endl;
+        
+        TWAMPTestPacket received_packet;
+        TWAMPTestPacket response_packet;
+        struct sockaddr_in client_addr;
+        socklen_t client_addr_len = sizeof(client_addr);
+        
+        while (running) {
+            // Receive test packet
+            ssize_t bytes_received = recvfrom(socket_fd, &received_packet, 
+                                            sizeof(received_packet), 0,
+                                            (struct sockaddr*)&client_addr, 
+                                            &client_addr_len);
+            
+            if (bytes_received < 0) {
+                if (errno == EINTR && !running) {
+                    break; // Interrupted by signal
+                }
+                std::cerr << "Error receiving packet: " << strerror(errno) << std::endl;
+                continue;
+            }
+            
+            // Record receive time as soon as possible
+            uint64_t receive_time = getNTPTimestamp();
+            
+            if (bytes_received != sizeof(TWAMPTestPacket)) {
+                std::cout << "Received packet with incorrect size: " << bytes_received 
+                         << " bytes (expected " << sizeof(TWAMPTestPacket) << ")" << std::endl;
+                continue;
+            }
+            
+            // Process the test packet and create response
+            processTestPacket(received_packet, response_packet, receive_time);
+            
+            // Send response back to sender
+            ssize_t bytes_sent = sendto(socket_fd, &response_packet, 
+                                      sizeof(response_packet), 0,
+                                      (struct sockaddr*)&client_addr, 
+                                      client_addr_len);
+            
+            if (bytes_sent < 0) {
+                std::cerr << "Error sending response: " << strerror(errno) << std::endl;
+                continue;
+            }
+            
+            // Log the transaction
+            uint32_t seq_num = ntohl(received_packet.sequence_number);
+            std::cout << "Reflected packet from " << inet_ntoa(client_addr.sin_addr) 
+                     << ":" << ntohs(client_addr.sin_port) 
+                     << " (seq: " << seq_num << ")" << std::endl;
+        }
+        
+        std::cout << "TWAMP Light Reflector stopped." << std::endl;
     }
     
-    void printStatistics() {
-        if (results.empty()) return;
-        
-        int sent = results.size();
-        int received = 0;
-        double total_rtt = 0;
-        double min_rtt = 999999;
-        double max_rtt = 0;
-        
-        for (const auto& result : results) {
-            if (result.received) {
-                received++;
-                total_rtt += result.rtt_ms;
-                if (result.rtt_ms < min_rtt) min_rtt = result.rtt_ms;
-                if (result.rtt_ms > max_rtt) max_rtt = result.rtt_ms;
-            }
-        }
-        
-        std::cout << "\n--- TWAMP Light Test Statistics ---" << std::endl;
-        std::cout << "Packets sent: " << sent << std::endl;
-        std::cout << "Packets received: " << received << std::endl;
-        std::cout << "Packet loss: " << std::fixed << std::setprecision(1) 
-                 << (100.0 * (sent - received) / sent) << "%" << std::endl;
-        
-        if (received > 0) {
-            double avg_rtt = total_rtt / received;
-            std::cout << "RTT min/avg/max: " << std::fixed << std::setprecision(3)
-                     << min_rtt << "/" << avg_rtt << "/" << max_rtt << " ms" << std::endl;
+    void stop() {
+        running = false;
+        if (socket_fd >= 0) {
+            close(socket_fd);
+            socket_fd = -1;
         }
     }
 };
 
+// Global reflector instance for signal handling
+TWAMPLightReflector* g_reflector = nullptr;
+
+// Signal handler for graceful shutdown
+void signalHandler(int signal) {
+    std::cout << "\nReceived signal " << signal << ". Shutting down..." << std::endl;
+    if (g_reflector) {
+        g_reflector->stop();
+    }
+}
+
 void printUsage(const char* program_name) {
-    std::cout << "Usage: " << program_name << " <server_ip> [server_port] [packet_count] [interval]" << std::endl;
-    std::cout << "  server_ip    - IP address of TWAMP Light reflector" << std::endl;
-    std::cout << "  server_port  - Port (default: 862)" << std::endl;
-    std::cout << "  packet_count - Number of packets to send (default: 10)" << std::endl;
-    std::cout << "  interval     - Interval between packets in seconds (default: 1.0)" << std::endl;
-    std::cout << std::endl;
-    std::cout << "Examples:" << std::endl;
-    std::cout << "  " << program_name << " 127.0.0.1" << std::endl;
-    std::cout << "  " << program_name << " 192.168.1.100 862 20 0.5" << std::endl;
+    std::cout << "Usage: " << program_name << " [port]" << std::endl;
+    std::cout << "Default port is 862 (TWAMP Light standard port)" << std::endl;
 }
 
 int main(int argc, char* argv[]) {
-    if (argc < 2) {
+    uint16_t port = 862; // Default TWAMP Light port
+    
+    // Parse command line arguments
+    if (argc > 2) {
         printUsage(argv[0]);
         return 1;
     }
     
-    std::string server_ip = argv[1];
-    uint16_t server_port = 862;
-    int packet_count = 10;
-    double interval = 1.0;
-    
-    if (argc > 2) {
-        server_port = static_cast<uint16_t>(atoi(argv[2]));
-        if (server_port == 0) {
-            std::cerr << "Invalid port: " << argv[2] << std::endl;
+    if (argc == 2) {
+        int user_port = atoi(argv[1]);
+        if (user_port <= 0 || user_port > 65535) {
+            std::cerr << "Invalid port number: " << argv[1] << std::endl;
             return 1;
         }
+        port = static_cast<uint16_t>(user_port);
     }
     
-    if (argc > 3) {
-        packet_count = atoi(argv[3]);
-        if (packet_count <= 0) {
-            std::cerr << "Invalid packet count: " << argv[3] << std::endl;
-            return 1;
-        }
-    }
+    // Set up signal handlers for graceful shutdown
+    signal(SIGINT, signalHandler);
+    signal(SIGTERM, signalHandler);
     
-    if (argc > 4) {
-        interval = atof(argv[4]);
-        if (interval <= 0) {
-            std::cerr << "Invalid interval: " << argv[4] << std::endl;
-            return 1;
-        }
-    }
+    // Create and initialize reflector
+    TWAMPLightReflector reflector(port);
+    g_reflector = &reflector;
     
-    TWAMPLightClient client(server_ip, server_port);
-    
-    if (!client.initialize()) {
-        std::cerr << "Failed to initialize TWAMP Light Client" << std::endl;
+    if (!reflector.initialize()) {
+        std::cerr << "Failed to initialize TWAMP Light Reflector" << std::endl;
         return 1;
     }
     
-    client.runTest(packet_count, interval);
+    // Run the reflector
+    reflector.run();
     
     return 0;
 }
