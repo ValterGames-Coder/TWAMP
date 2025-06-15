@@ -7,29 +7,28 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <chrono>
+#include <cstdint>
 
 // Порт по умолчанию для TWAMP Light
 constexpr int TWAMP_LIGHT_PORT = 862;
 constexpr int BUFFER_SIZE = 1500;
 
-// Функция для записи текущего времени в формате NTP в буфер (8 байт)
+// Функция записи NTP timestamp в буфер 8 байт
 void set_ntp_timestamp(uint8_t* buffer) {
     using namespace std::chrono;
 
     auto now = system_clock::now();
     auto duration_since_epoch = now.time_since_epoch();
 
-    // Количество секунд с 1900-01-01 00:00:00 UTC (NTP эпоха)
-    uint64_t ntp_epoch_offset = 2208988800ULL; 
+    uint64_t ntp_epoch_offset = 2208988800ULL;
 
-    auto seconds = duration_cast<seconds>(duration_since_epoch).count();
-    auto microseconds = duration_cast<microseconds>(duration_since_epoch).count() % 1000000;
+    // Явно указываем типы с пространством имён std::chrono
+    auto sec_duration = duration_cast<std::chrono::seconds>(duration_since_epoch);
+    auto microsec_duration = duration_cast<std::chrono::microseconds>(duration_since_epoch - sec_duration);
 
-    uint32_t sec = static_cast<uint32_t>(seconds + ntp_epoch_offset);
-    // Формат дробной части секунды: fraction = microseconds * 2^32 / 1'000'000
-    uint32_t frac = static_cast<uint32_t>((uint64_t(microseconds) * 0x100000000ULL) / 1000000ULL);
+    uint32_t sec = static_cast<uint32_t>(sec_duration.count() + ntp_epoch_offset);
+    uint32_t frac = static_cast<uint32_t>((uint64_t(microsec_duration.count()) * 0x100000000ULL) / 1000000ULL);
 
-    // Пишем в буфер в сетевом порядке (big-endian)
     buffer[0] = (sec >> 24) & 0xFF;
     buffer[1] = (sec >> 16) & 0xFF;
     buffer[2] = (sec >> 8) & 0xFF;
