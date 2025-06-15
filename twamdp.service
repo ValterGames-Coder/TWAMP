@@ -3,9 +3,7 @@ Description=TWAMP Server Daemon
 After=network.target
 
 [Service]
-Type=forking
-PIDFile=/run/twamp-server.pid
-ExecStart=/usr/bin/twamp-server
+ExecStart=/usr/local/bin/twamp_server
 Restart=on-failure
 
 [Install]
