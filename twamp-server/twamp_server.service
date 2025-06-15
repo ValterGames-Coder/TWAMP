@@ -3,11 +3,10 @@ Description=TWAMP Light UDP Reflector (RFC 5357)
 After=network.target
 
 [Service]
+Type=simple
 ExecStart=/usr/local/bin/twamp_light_reflector
-PIDFile=/var/run/twamp_light_reflector.pid
 Restart=on-failure
 User=root
-Group=root
 
 [Install]
 WantedBy=multi-user.target
