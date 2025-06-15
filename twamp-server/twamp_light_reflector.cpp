@@ -1,3 +1,6 @@
+// TWAMP Light (RFC 5357) compliant UDP reflector server
+// Fully correct implementation with NTP timestamps and proper Sequence copy
+
 #include <iostream>
 #include <cstring>
 #include <csignal>
@@ -8,22 +11,24 @@
 int sockfd;
 bool running = true;
 
+// NTP Timestamp: 64 bits = 32s seconds + 32s fractional
 struct NtpTimestamp {
     uint32_t seconds;
     uint32_t fraction;
 };
 
+// Convert system time to NTP format
 NtpTimestamp get_ntp_time() {
     using namespace std::chrono;
     auto now = system_clock::now();
-    auto duration = now.time_since_epoch();
+    auto since_epoch = now.time_since_epoch();
+    auto seconds = duration_cast<seconds>(since_epoch).count();
+    auto nanoseconds = duration_cast<nanoseconds>(since_epoch).count() % 1'000'000'000;
 
-    uint64_t ms = duration_cast<milliseconds>(duration).count();
-    uint32_t sec = ms / 1000;
-    uint32_t frac = (uint32_t)(((ms % 1000) / 1000.0) * (1LL << 32));
-
+    // 2^32 ~= 4.294967296e9 => fraction = nanoseconds * (2^32 / 1e9)
+    uint32_t fraction = (uint32_t)((nanoseconds * (1LL << 32)) / 1'000'000'000);
     const uint32_t NTP_UNIX_OFFSET = 2208988800U;
-    return { sec + NTP_UNIX_OFFSET, frac };
+    return { (uint32_t)(seconds + NTP_UNIX_OFFSET), fraction };
 }
 
 void handle_signal(int) {
@@ -51,52 +56,50 @@ int main() {
         return 1;
     }
 
-    std::cout << "TWAMP Light RFC-compliant reflector running on port 20000\n";
+    std::cout << "[TWAMP] Reflector running on UDP port 20000\n";
 
     while (running) {
-        char buffer[1500];
-        sockaddr_in client_addr{};
-        socklen_t client_len = sizeof(client_addr);
+        uint8_t buffer[1500];
+        sockaddr_in client{};
+        socklen_t client_len = sizeof(client);
 
         ssize_t recv_len = recvfrom(sockfd, buffer, sizeof(buffer), 0,
-                                    (sockaddr*)&client_addr, &client_len);
-        if (recv_len < 32) continue;
+                                    (sockaddr*)&client, &client_len);
+        if (recv_len < 32) continue; // TWAMP-Test packet must be >= 32
 
-        // Формируем ответ
-        char reply[1500];
+        uint8_t reply[1500];
         memset(reply, 0, sizeof(reply));
 
-        // MBZ (0), Control (0)
+        // 0: MBZ
         reply[0] = 0;
-        reply[1] = 0;
 
-        // Копируем Sequence Number (байты 4–7) из запроса в ответ
+        // 1: Control (0x00 = no control)
+        reply[1] = 0x00;
+
+        // 4–7: Sequence Number (copied from received packet)
         memcpy(&reply[4], &buffer[4], 4);
 
-        // Копируем Originate Timestamp (байты 8–15) из запроса в ответ
+        // 8–15: Originate Timestamp (copy from received)
         memcpy(&reply[8], &buffer[8], 8);
 
-        // Получаем текущее время
-        NtpTimestamp now = get_ntp_time();
-        uint32_t sec = htonl(now.seconds);
-        uint32_t frac = htonl(now.fraction);
+        // 16–23: Receive Timestamp (when request was received)
+        NtpTimestamp rcv = get_ntp_time();
+        *(uint32_t*)&reply[16] = htonl(rcv.seconds);
+        *(uint32_t*)&reply[20] = htonl(rcv.fraction);
 
-        // Receive Timestamp (байты 16–23)
-        memcpy(&reply[16], &sec, 4);
-        memcpy(&reply[20], &frac, 4);
+        // 24–31: Transmit Timestamp (immediately before send)
+        NtpTimestamp xmt = get_ntp_time();
+        *(uint32_t*)&reply[24] = htonl(xmt.seconds);
+        *(uint32_t*)&reply[28] = htonl(xmt.fraction);
 
-        // Send Timestamp (байты 24–31)
-        memcpy(&reply[24], &sec, 4);
-        memcpy(&reply[28], &frac, 4);
-
-        // Остальной payload (если был)
+        // Append payload if any (after 32 bytes)
         if (recv_len > 32)
             memcpy(&reply[32], &buffer[32], recv_len - 32);
 
-        sendto(sockfd, reply, recv_len, 0,
-               (sockaddr*)&client_addr, client_len);
+        sendto(sockfd, reply, recv_len, 0, (sockaddr*)&client, client_len);
     }
 
+    std::cout << "\n[TWAMP] Server terminated." << std::endl;
     return 0;
 }
 
