@@ -1,17 +1,12 @@
 #include <iostream>
-#include <csignal>
 #include <cstring>
-#include <cstdint>
-#include <unistd.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
+#include <csignal>
 #include <chrono>
-#include <sys/socket.h>
+#include <netinet/in.h>
+#include <unistd.h>
 
-constexpr int UDP_PORT = 20000;
-volatile bool running = true;
-
-constexpr uint64_t NTP_UNIX_EPOCH_OFFSET = 2208988800ULL;
+int sockfd;
+bool running = true;
 
 struct NtpTimestamp {
     uint32_t seconds;
@@ -20,25 +15,27 @@ struct NtpTimestamp {
 
 NtpTimestamp get_ntp_time() {
     using namespace std::chrono;
-    auto now = system_clock::now().time_since_epoch();
-    auto secs = duration_cast<seconds>(now).count();
-    auto nanos = duration_cast<nanoseconds>(now).count() % 1'000'000'000;
+    auto now = system_clock::now();
+    auto duration = now.time_since_epoch();
 
-    uint32_t ntp_secs = static_cast<uint32_t>(secs + NTP_UNIX_EPOCH_OFFSET);
-    uint32_t ntp_frac = static_cast<uint32_t>((nanos * (1LL << 32)) / 1'000'000'000);
+    uint64_t ms = duration_cast<milliseconds>(duration).count();
+    uint32_t sec = ms / 1000;
+    uint32_t frac = (uint32_t)(((ms % 1000) / 1000.0) * (1LL << 32));
 
-    return {ntp_secs, ntp_frac};
+    const uint32_t NTP_UNIX_OFFSET = 2208988800U;
+    return { sec + NTP_UNIX_OFFSET, frac };
 }
 
-void signal_handler(int) {
+void handle_signal(int) {
     running = false;
+    close(sockfd);
 }
 
 int main() {
-    signal(SIGINT, signal_handler);
-    signal(SIGTERM, signal_handler);
+    signal(SIGINT, handle_signal);
+    signal(SIGTERM, handle_signal);
 
-    int sockfd = socket(AF_INET, SOCK_DGRAM, 0);
+    sockfd = socket(AF_INET, SOCK_DGRAM, 0);
     if (sockfd < 0) {
         perror("socket");
         return 1;
@@ -46,47 +43,46 @@ int main() {
 
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
+    addr.sin_port = htons(20000);
     addr.sin_addr.s_addr = INADDR_ANY;
-    addr.sin_port = htons(UDP_PORT);
 
     if (bind(sockfd, (sockaddr*)&addr, sizeof(addr)) < 0) {
         perror("bind");
-        close(sockfd);
         return 1;
     }
 
-    std::cout << "TWAMP Light Reflector started on UDP port " << UDP_PORT << std::endl;
-
-    char buffer[1500];
-    sockaddr_in client_addr{};
-    socklen_t client_len = sizeof(client_addr);
+    std::cout << "TWAMP Light reflector started on port 20000\n";
 
     while (running) {
+        char buffer[1500];
+        sockaddr_in client_addr{};
+        socklen_t client_len = sizeof(client_addr);
+
         ssize_t recv_len = recvfrom(sockfd, buffer, sizeof(buffer), 0,
                                     (sockaddr*)&client_addr, &client_len);
-        if (recv_len < 0) continue;
+        if (recv_len < 32) continue;  // минимальный размер TWAMP-Test
 
-        if (recv_len >= 32) {
-            char reply[1500];
-            memcpy(reply, buffer, recv_len);
+        char reply[1500];
+        memcpy(reply, buffer, recv_len);  // копируем весь пакет
 
-            NtpTimestamp now = get_ntp_time();
-            uint32_t secs = htonl(now.seconds);
-            uint32_t frac = htonl(now.fraction);
-            
-            memcpy(&reply[4], &buffer[4], 4);
+        // Генерируем текущие NTP-временные метки
+        NtpTimestamp now = get_ntp_time();
+        uint32_t secs = htonl(now.seconds);
+        uint32_t frac = htonl(now.fraction);
 
-            memcpy(&reply[16], &secs, 4); // Receive Timestamp
-            memcpy(&reply[20], &frac, 4);
-            memcpy(&reply[24], &secs, 4); // Send Timestamp
-            memcpy(&reply[28], &frac, 4);
+        // RFC 5357 §4.2.1: копируем Sequence Number
+        memcpy(&reply[4], &buffer[4], 4);  // <-- ключевая правка
 
-            sendto(sockfd, reply, recv_len, 0,
-                   (sockaddr*)&client_addr, client_len);
-        }
+        // Заполняем Receive и Send timestamps (байты 16–23 и 24–31)
+        memcpy(&reply[16], &secs, 4);
+        memcpy(&reply[20], &frac, 4);
+        memcpy(&reply[24], &secs, 4);
+        memcpy(&reply[28], &frac, 4);
+
+        sendto(sockfd, reply, recv_len, 0, (sockaddr*)&client_addr, client_len);
     }
 
-    close(sockfd);
+    std::cout << "TWAMP reflector stopped.\n";
     return 0;
 }
 
