@@ -1,45 +1,70 @@
-// twamp_server_full.cpp
-
+// twamp_server.cpp
 #include <iostream>
 #include <cstring>
-#include <cstdlib>
-#include <unistd.h>
-#include <csignal>
-#include <arpa/inet.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
 #include <thread>
 #include <atomic>
+#include <vector>
+#include <unistd.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <cerrno>
+#include <csignal>
 
-constexpr int CONTROL_PORT = 862;
-constexpr int UDP_PORT = 862; // UDP для теста — совпадает с TCP портом по RFC
-constexpr int UDP_TEST_PORT = 862 + 1; // Порт UDP для TWAMP test packets
+constexpr int CONTROL_PORT = 862;          // TCP port for TWAMP control (handshake)
+constexpr int UDP_PORT = 20000;             // UDP port for TWAMP test packets (echo)
+constexpr size_t TWAMP_MSG_SIZE = 512;      // Максимальный размер UDP пакета для TWAMP Echo
 
-std::atomic<bool> running(true);
+std::atomic<bool> running{true};
+int tcp_sockfd = -1;
+int udp_sockfd = -1;
 
-void signal_handler(int signum) {
+void signal_handler(int signal) {
     running = false;
+    if (tcp_sockfd >= 0) {
+        shutdown(tcp_sockfd, SHUT_RDWR);
+        close(tcp_sockfd);
+        tcp_sockfd = -1;
+    }
+    if (udp_sockfd >= 0) {
+        close(udp_sockfd);
+        udp_sockfd = -1;
+    }
 }
 
-#pragma pack(push, 1)
-struct ServerGreeting {
-    uint32_t modes;
-    uint8_t challenge[16];
-    uint8_t salt[16];
-    uint32_t count;
-};
+ssize_t readN(int sock, void* buffer, size_t len) {
+    size_t total = 0;
+    char* buf = (char*)buffer;
+    while (total < len) {
+        ssize_t ret = read(sock, buf + total, len - total);
+        if (ret <= 0) {
+            if (ret == 0) return total;
+            if (errno == EINTR) continue;
+            return -1;
+        }
+        total += ret;
+    }
+    return total;
+}
 
-struct UDPTestPacket {
-    uint8_t type;
-    uint8_t reserved[11];
-    uint64_t timestamp; // 64 бит, например
-    // ... для примера, не строго RFC
-};
-#pragma pack(pop)
+ssize_t writeN(int sock, const void* buffer, size_t len) {
+    size_t total = 0;
+    const char* buf = (const char*)buffer;
+    while (total < len) {
+        ssize_t ret = write(sock, buf + total, len - total);
+        if (ret <= 0) {
+            if (ret == 0) return total;
+            if (errno == EINTR) continue;
+            return -1;
+        }
+        total += ret;
+    }
+    return total;
+}
 
-void udp_reflector_thread() {
-    int udp_sock = socket(AF_INET, SOCK_DGRAM, 0);
-    if (udp_sock < 0) {
+void udp_echo_server() {
+    udp_sockfd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (udp_sockfd < 0) {
         perror("UDP socket");
         return;
     }
@@ -47,163 +72,154 @@ void udp_reflector_thread() {
     sockaddr_in udp_addr{};
     udp_addr.sin_family = AF_INET;
     udp_addr.sin_addr.s_addr = INADDR_ANY;
-    udp_addr.sin_port = htons(UDP_TEST_PORT);
+    udp_addr.sin_port = htons(UDP_PORT);
 
-    if (bind(udp_sock, (sockaddr*)&udp_addr, sizeof(udp_addr)) < 0) {
+    if (bind(udp_sockfd, (sockaddr*)&udp_addr, sizeof(udp_addr)) < 0) {
         perror("UDP bind");
-        close(udp_sock);
+        close(udp_sockfd);
+        udp_sockfd = -1;
         return;
     }
 
-    std::cout << "UDP reflector listening on port " << UDP_TEST_PORT << std::endl;
+    std::cout << "UDP echo server listening on port " << UDP_PORT << std::endl;
 
+    char buffer[TWAMP_MSG_SIZE];
     while (running) {
-        uint8_t buffer[1500];
         sockaddr_in client_addr{};
         socklen_t client_len = sizeof(client_addr);
-
-        ssize_t len = recvfrom(udp_sock, buffer, sizeof(buffer), 0,
-                               (sockaddr*)&client_addr, &client_len);
-        if (len < 0) {
-            if (running) perror("UDP recvfrom");
-            continue;
+        ssize_t recv_len = recvfrom(udp_sockfd, buffer, sizeof(buffer), 0, (sockaddr*)&client_addr, &client_len);
+        if (recv_len < 0) {
+            if (errno == EINTR) continue;
+            perror("UDP recvfrom");
+            break;
         }
 
-        // Просто эхо: отправляем обратно тот же пакет
-        ssize_t sent = sendto(udp_sock, buffer, len, 0,
-                              (sockaddr*)&client_addr, client_len);
-        if (sent != len) {
+        // Просто отправляем назад тот же пакет
+        ssize_t sent_len = sendto(udp_sockfd, buffer, recv_len, 0, (sockaddr*)&client_addr, client_len);
+        if (sent_len < 0) {
             perror("UDP sendto");
+            break;
         }
     }
 
-    close(udp_sock);
-}
-
-// Основная сессия TCP управления
-void control_session(int client_sock, sockaddr_in client_addr) {
-    std::cout << "New TWAMP control session from " << inet_ntoa(client_addr.sin_addr) << std::endl;
-
-    // Отправляем Server Greeting (36 байт)
-    ServerGreeting greeting{};
-    greeting.modes = htonl(1); // Mode 1 - unauthenticated
-    memset(greeting.challenge, 0, sizeof(greeting.challenge));
-    memset(greeting.salt, 0, sizeof(greeting.salt));
-    greeting.count = htonl(0);
-
-    if (send(client_sock, &greeting, sizeof(greeting), 0) != sizeof(greeting)) {
-        std::cerr << "Failed to send Server Greeting" << std::endl;
-        close(client_sock);
-        return;
+    if (udp_sockfd >= 0) {
+        close(udp_sockfd);
+        udp_sockfd = -1;
     }
-
-    // Принимаем Setup Response (48 байт)
-    uint8_t setup_response[48]{};
-    ssize_t recvd = recv(client_sock, setup_response, sizeof(setup_response), MSG_WAITALL);
-    if (recvd != sizeof(setup_response)) {
-        std::cerr << "Failed to receive Setup Response" << std::endl;
-        close(client_sock);
-        return;
-    }
-
-    // Отправляем Accept Session (84 байта)
-    uint8_t accept_session[84]{};
-    accept_session[0] = 0; // Message Type = Accept Session
-    if (send(client_sock, accept_session, sizeof(accept_session), 0) != sizeof(accept_session)) {
-        std::cerr << "Failed to send Accept Session" << std::endl;
-        close(client_sock);
-        return;
-    }
-
-    // Ждем Start Sessions Request (44 байта)
-    uint8_t start_sessions[44]{};
-    recvd = recv(client_sock, start_sessions, sizeof(start_sessions), MSG_WAITALL);
-    if (recvd != sizeof(start_sessions)) {
-        std::cerr << "Failed to receive Start Sessions" << std::endl;
-        close(client_sock);
-        return;
-    }
-
-    // Отвечаем Start Sessions Reply (20 байт)
-    uint8_t start_sessions_reply[20]{};
-    start_sessions_reply[0] = 0; // Message Type = Start Sessions Reply
-    // остальные поля нули
-
-    if (send(client_sock, start_sessions_reply, sizeof(start_sessions_reply), 0) != sizeof(start_sessions_reply)) {
-        std::cerr << "Failed to send Start Sessions Reply" << std::endl;
-        close(client_sock);
-        return;
-    }
-
-    std::cout << "TWAMP session started with " << inet_ntoa(client_addr.sin_addr) << std::endl;
-
-    // Теперь ждем Stop Sessions или просто закрываем по SIGINT
-    while (running) {
-        uint8_t buf[20]{};
-        ssize_t r = recv(client_sock, buf, sizeof(buf), 0);
-        if (r <= 0) break; // закрытие или ошибка
-        // Для упрощения — игнорируем команды
-    }
-
-    std::cout << "TWAMP session ended with " << inet_ntoa(client_addr.sin_addr) << std::endl;
-    close(client_sock);
 }
 
 int main() {
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
 
-    int sockfd = socket(AF_INET, SOCK_STREAM, 0);
-    if (sockfd < 0) {
+    // Запускаем UDP echo сервер в отдельном потоке
+    std::thread udp_thread(udp_echo_server);
+
+    tcp_sockfd = socket(AF_INET, SOCK_STREAM, 0);
+    if (tcp_sockfd < 0) {
         perror("socket");
+        running = false;
+        udp_thread.join();
         return 1;
     }
 
     int opt = 1;
-    setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    setsockopt(tcp_sockfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 
     sockaddr_in server_addr{};
     server_addr.sin_family = AF_INET;
     server_addr.sin_addr.s_addr = INADDR_ANY;
     server_addr.sin_port = htons(CONTROL_PORT);
 
-    if (bind(sockfd, (sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
+    if (bind(tcp_sockfd, (sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
         perror("bind");
-        close(sockfd);
+        close(tcp_sockfd);
+        running = false;
+        udp_thread.join();
         return 1;
     }
 
-    if (listen(sockfd, 5) < 0) {
+    if (listen(tcp_sockfd, 5) < 0) {
         perror("listen");
-        close(sockfd);
+        close(tcp_sockfd);
+        running = false;
+        udp_thread.join();
         return 1;
     }
 
-    std::cout << "TWAMP server listening on TCP port " << CONTROL_PORT << std::endl;
-
-    // Запускаем UDP отражатель в отдельном потоке
-    std::thread udp_thread(udp_reflector_thread);
+    std::cout << "TWAMP server TCP listening on port " << CONTROL_PORT << std::endl;
 
     while (running) {
         sockaddr_in client_addr{};
         socklen_t client_len = sizeof(client_addr);
-        int client_sock = accept(sockfd, (sockaddr*)&client_addr, &client_len);
+        int client_sock = accept(tcp_sockfd, (sockaddr*)&client_addr, &client_len);
         if (client_sock < 0) {
-            if (running) perror("accept");
-            continue;
+            if (errno == EINTR) continue;
+            perror("accept");
+            break;
         }
 
-        // Обрабатываем каждое соединение в отдельном потоке
-        std::thread(control_session, client_sock, client_addr).detach();
+        std::cout << "New TWAMP TCP connection from " << inet_ntoa(client_addr.sin_addr) << std::endl;
+
+        unsigned char clientGreeting[64]{};
+        unsigned char serverGreeting[64]{};
+        unsigned char clientSetupResponse[64]{};
+        unsigned char serverAcceptSession[64]{};
+
+        // 1. Получить Greeting клиента
+        if (readN(client_sock, clientGreeting, 64) != 64) {
+            std::cerr << "Failed to receive client Greeting\n";
+            close(client_sock);
+            continue;
+        }
+        std::cout << "Received client Greeting\n";
+
+        // 2. Отправить Greeting сервера
+        memset(serverGreeting, 0, sizeof(serverGreeting));
+        serverGreeting[0] = 1;  // version = 1
+        if (writeN(client_sock, serverGreeting, 64) != 64) {
+            std::cerr << "Failed to send server Greeting\n";
+            close(client_sock);
+            continue;
+        }
+        std::cout << "Sent server Greeting\n";
+
+        // 3. Получить Setup Response от клиента
+        if (readN(client_sock, clientSetupResponse, 64) != 64) {
+            std::cerr << "Failed to receive Setup Response\n";
+            close(client_sock);
+            continue;
+        }
+        std::cout << "Received Setup Response\n";
+
+        // 4. Отправить Accept Session
+        memset(serverAcceptSession, 0, sizeof(serverAcceptSession));
+        serverAcceptSession[0] = 1;  // версия
+        if (writeN(client_sock, serverAcceptSession, 64) != 64) {
+            std::cerr << "Failed to send Accept Session\n";
+            close(client_sock);
+            continue;
+        }
+        std::cout << "Sent Accept Session\n";
+
+        // После handshake TCP соединение остаётся открытым,
+        // сервер не реализует дальше управление сессией для простоты.
+        // Можно тут добавить логику взаимодействия, сейчас просто ждём закрытия клиентом
+
+        close(client_sock);
+        std::cout << "Closed client connection\n";
     }
 
-    std::cout << "Shutting down server..." << std::endl;
-    close(sockfd);
+    if (tcp_sockfd >= 0) {
+        close(tcp_sockfd);
+        tcp_sockfd = -1;
+    }
 
     running = false;
-    udp_thread.join();
+    if (udp_thread.joinable())
+        udp_thread.join();
 
-    std::cout << "Server stopped." << std::endl;
+    std::cout << "Server shut down." << std::endl;
     return 0;
 }
 
