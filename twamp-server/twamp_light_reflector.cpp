@@ -9,22 +9,21 @@
 #include <chrono>
 #include <cstdint>
 
-// Порт по умолчанию для TWAMP Light
 constexpr int TWAMP_LIGHT_PORT = 862;
 constexpr int BUFFER_SIZE = 1500;
 
-// Функция записи NTP timestamp в буфер 8 байт
 void set_ntp_timestamp(uint8_t* buffer) {
     using namespace std::chrono;
 
     auto now = system_clock::now();
     auto duration_since_epoch = now.time_since_epoch();
 
+    // Сдвиг для эпохи NTP (с 1900), системное время считается от 1970
     uint64_t ntp_epoch_offset = 2208988800ULL;
 
-    // Явно указываем типы с пространством имён std::chrono
-    auto sec_duration = duration_cast<std::chrono::seconds>(duration_since_epoch);
-    auto microsec_duration = duration_cast<std::chrono::microseconds>(duration_since_epoch - sec_duration);
+    // Время в секундах и микросекундах
+    auto sec_duration = duration_cast<seconds>(duration_since_epoch);
+    auto microsec_duration = duration_cast<microseconds>(duration_since_epoch - sec_duration);
 
     uint32_t sec = static_cast<uint32_t>(sec_duration.count() + ntp_epoch_offset);
     uint32_t frac = static_cast<uint32_t>((uint64_t(microsec_duration.count()) * 0x100000000ULL) / 1000000ULL);
@@ -61,6 +60,7 @@ int main() {
     std::cout << "TWAMP Light reflector started on UDP port " << TWAMP_LIGHT_PORT << std::endl;
 
     uint8_t buffer[BUFFER_SIZE];
+
     while (true) {
         sockaddr_in client_addr{};
         socklen_t client_len = sizeof(client_addr);
@@ -72,33 +72,36 @@ int main() {
         }
 
         if (recv_len < 44) {
-            // Минимальный размер пакета TWAMP-Test — 44 байта
             std::cerr << "Received too small packet, ignoring\n";
             continue;
         }
 
-        // В пакете TWAMP Light:
-        // - Поле Receive Timestamp (8 байт) начинается с 8-го байта (offset 8)
-        // - Поле Send Timestamp (8 байт) начинается с 16-го байта (offset 16)
-        // - TTL (1 байт) находится в байте с offset 7
+        // Копируем sequence (4 байта) из пакета запроса в ответ
+        // Sequence — первые 4 байта (offset 0..3) в пакете
+        // Они должны остаться без изменений
+        // Но можно проверить, например:
+        uint32_t sequence = ntohl(*(uint32_t*)(buffer));
+        // Не изменяем, просто для логов
+        std::cout << "[TEST] Packet Received :: Sequence " << sequence << std::endl;
 
-        // Устанавливаем TTL = 255 (максимальное значение)
+        // Устанавливаем TTL в 255 (байт с offset 7)
         buffer[7] = 255;
 
-        // Записываем Receive Timestamp (время получения) в поле с offset 8
+        // Записываем Receive Timestamp в offset 8 (8 байт)
         set_ntp_timestamp(buffer + 8);
 
-        // Записываем Send Timestamp (время отправки) в поле с offset 16
-        // Обычно Send Timestamp ставится непосредственно перед отправкой, но здесь поставим также сейчас,
-        // т.к. задержка минимальна и для демонстрации
+        // Записываем Send Timestamp в offset 16 (8 байт)
+        // Делать сразу перед отправкой
         set_ntp_timestamp(buffer + 16);
 
-        // Отправляем обратно полученный пакет
+        // Отправляем обратно тот же пакет, с обновлёнными временными метками
         ssize_t sent_len = sendto(sockfd, buffer, recv_len, 0, (sockaddr*)&client_addr, client_len);
         if (sent_len < 0) {
             perror("sendto");
             continue;
         }
+
+        std::cout << "[TEST] Packet Sent :: Sequence " << sequence << std::endl;
     }
 
     close(sockfd);
