@@ -51,7 +51,7 @@ int main() {
         return 1;
     }
 
-    std::cout << "TWAMP Light reflector running on port 20000\n";
+    std::cout << "TWAMP Light RFC-compliant reflector running on port 20000\n";
 
     while (running) {
         char buffer[1500];
@@ -62,24 +62,37 @@ int main() {
                                     (sockaddr*)&client_addr, &client_len);
         if (recv_len < 32) continue;
 
-        // Подготовка ответа
+        // Формируем ответ
         char reply[1500];
-        memcpy(reply, buffer, recv_len); // копируем всё
+        memset(reply, 0, sizeof(reply));
 
-        // Генерация NTP времени
+        // MBZ (0), Control (0)
+        reply[0] = 0;
+        reply[1] = 0;
+
+        // Копируем Sequence Number (байты 4–7) из запроса в ответ
+        memcpy(&reply[4], &buffer[4], 4);
+
+        // Копируем Originate Timestamp (байты 8–15) из запроса в ответ
+        memcpy(&reply[8], &buffer[8], 8);
+
+        // Получаем текущее время
         NtpTimestamp now = get_ntp_time();
         uint32_t sec = htonl(now.seconds);
         uint32_t frac = htonl(now.fraction);
 
-        // Пишем receive timestamp (байты 16–23)
+        // Receive Timestamp (байты 16–23)
         memcpy(&reply[16], &sec, 4);
         memcpy(&reply[20], &frac, 4);
 
-        // Пишем send timestamp (байты 24–31)
+        // Send Timestamp (байты 24–31)
         memcpy(&reply[24], &sec, 4);
         memcpy(&reply[28], &frac, 4);
 
-        // Отправляем обратно
+        // Остальной payload (если был)
+        if (recv_len > 32)
+            memcpy(&reply[32], &buffer[32], recv_len - 32);
+
         sendto(sockfd, reply, recv_len, 0,
                (sockaddr*)&client_addr, client_len);
     }
