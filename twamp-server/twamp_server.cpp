@@ -73,6 +73,8 @@ int main() {
             NtpTimestamp now = get_ntp_time();
             uint32_t secs = htonl(now.seconds);
             uint32_t frac = htonl(now.fraction);
+            
+            memcpy(&reply[4], &buffer[4], 4);
 
             memcpy(&reply[16], &secs, 4); // Receive Timestamp
             memcpy(&reply[20], &frac, 4);
