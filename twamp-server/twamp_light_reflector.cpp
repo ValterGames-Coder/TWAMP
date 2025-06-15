@@ -1,101 +1,103 @@
-// TWAMP Light Session-Reflector (Server) — исправлено согласно RFC 5357
-// Работает в режиме без аутентификации и без шифрования
+// twamp_light_reflector.cpp — исправленный код с учётом RFC 5357
 
 #include <iostream>
-#include <cstring>
-#include <cstdlib>
-#include <ctime>
-#include <unistd.h>
-#include <arpa/inet.h>
-#include <netinet/ip.h>
-#include <sys/socket.h>
+#include <boost/asio.hpp>
+#include <array>
 #include <chrono>
+#include <cstring>
 
-using namespace std;
+using boost::asio::ip::udp;
 using namespace std::chrono;
 
+uint64_t getNtpTimestamp() {
+    auto now = system_clock::now().time_since_epoch();
+    auto seconds_part = duration_cast<seconds>(now).count();
+    auto fractional_part = duration_cast<nanoseconds>(now).count() % 1'000'000'000ULL;
+
+    uint64_t ntp_seconds = seconds_part + 2208988800ULL;
+    uint64_t ntp_fraction = (fractional_part * ((1ULL << 32) / 1'000'000'000ULL));
+
+    return (ntp_seconds << 32) | ntp_fraction;
+}
+
 #pragma pack(push, 1)
-struct TwampTestRequest {
+struct TwampTestPacket {
     uint32_t sequence_number;
     uint64_t timestamp;
-    uint32_t error_estimate;
-    uint32_t mbz;
+    uint16_t error_estimate;
+    uint16_t mbz;
+    // Остальное может быть заполнением
 };
 
 struct TwampTestResponse {
-    uint32_t sequence_number;           // новое значение, независимое от sender
-    uint64_t timestamp;                 // время отправки ответа
-    uint32_t error_estimate;
-    uint32_t mbz1;
-    uint64_t receive_timestamp;         // время получения запроса
-    uint32_t mbz2;
+    uint32_t sequence_number;
+
+    uint64_t timestamp;
+    uint16_t error_estimate;
+    uint16_t mbz1;
+
+    uint64_t receive_timestamp;
     uint32_t sender_sequence_number;
-    uint32_t mbz3;
+
     uint64_t sender_timestamp;
-    uint32_t sender_error_estimate;
-    uint32_t mbz4;
+    uint16_t sender_error_estimate;
+    uint16_t mbz2;
+
     uint8_t sender_ttl;
-    uint8_t mbz5[15];                   // MBZ padding
-    uint8_t hmac[16];                   // игнорируем в режиме без HMAC
-    uint8_t padding[8];                // минимальное заполнение, можно увеличить
+    uint8_t mbz3[15];
+
+    uint8_t hmac[16];  // Пустой, если без аутентификации
+    uint8_t padding[0];
 };
 #pragma pack(pop)
 
-uint64_t getNtpTimestamp() {
-    using namespace chrono; 
-    auto now = system_clock::now();
-    auto duration = now.time_since_epoch();
-    uint64_t seconds = duration_cast<seconds>(duration).count();
-    uint64_t fraction = ((duration_cast<nanoseconds>(duration).count() % 1000000000ULL) << 32) / 1000000000ULL;
-    return ((seconds + 2208988800ULL) << 32) | fraction; // NTP timestamp
-}
-
 int main() {
-    const int port = 862;
-    int sockfd = socket(AF_INET, SOCK_DGRAM, 0);
-    if (sockfd < 0) {
-        perror("socket");
-        return 1;
-    }
+    try {
+        boost::asio::io_context io_context;
+        udp::socket socket(io_context, udp::endpoint(udp::v4(), 862));
 
-    sockaddr_in server_addr{}, client_addr{};
-    socklen_t addr_len = sizeof(client_addr);
-    server_addr.sin_family = AF_INET;
-    server_addr.sin_port = htons(port);
-    server_addr.sin_addr.s_addr = INADDR_ANY;
+        std::cout << "TWAMP Light Reflector запущен на порту 862...\n";
 
-    if (bind(sockfd, (sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
-        perror("bind");
-        return 1;
-    }
+        while (true) {
+            std::array<char, 1500> recv_buf{};
+            udp::endpoint remote_endpoint;
+            boost::system::error_code error;
 
-    cout << "TWAMP Light Server (Reflector) запущен на порту " << port << endl;
+            size_t len = socket.receive_from(boost::asio::buffer(recv_buf), remote_endpoint, 0, error);
 
-    while (true) {
-        TwampTestRequest request{};
-        ssize_t recv_len = recvfrom(sockfd, &request, sizeof(request), 0, (sockaddr*)&client_addr, &addr_len);
-        if (recv_len != sizeof(request)) {
-            cerr << "Получен некорректный размер пакета: " << recv_len << endl;
-            continue;
+            if (error && error != boost::asio::error::message_size)
+                throw boost::system::system_error(error);
+
+            if (len < sizeof(TwampTestPacket)) {
+                std::cerr << "Received too small packet." << std::endl;
+                continue;
+            }
+
+            TwampTestPacket* req = reinterpret_cast<TwampTestPacket*>(recv_buf.data());
+            TwampTestResponse resp{};
+
+            resp.sequence_number = htonl(req->sequence_number);
+            resp.timestamp = htobe64(getNtpTimestamp());
+            resp.error_estimate = htons(0);
+            resp.mbz1 = 0;
+
+            resp.receive_timestamp = htobe64(getNtpTimestamp());
+            resp.sender_sequence_number = htonl(req->sequence_number);
+
+            resp.sender_timestamp = req->timestamp; // уже в NTP-формате
+            resp.sender_error_estimate = req->error_estimate;
+            resp.mbz2 = 0;
+
+            resp.sender_ttl = 255; // можно получить от IP_RECVTTL, если нужно
+            std::memset(resp.mbz3, 0, sizeof(resp.mbz3));
+            std::memset(resp.hmac, 0, sizeof(resp.hmac));
+
+            socket.send_to(boost::asio::buffer(&resp, sizeof(resp)), remote_endpoint);
         }
-
-        uint64_t recv_time = getNtpTimestamp();
-
-        TwampTestResponse response{};
-        response.sequence_number = htonl(ntohl(request.sequence_number)); // новый sequence, можно инкрементировать
-        response.timestamp = getNtpTimestamp();
-        response.error_estimate = htonl(0); // пока без оценки
-        response.receive_timestamp = recv_time;
-        response.sender_sequence_number = request.sequence_number;
-        response.sender_timestamp = request.timestamp;
-        response.sender_error_estimate = request.error_estimate;
-        response.sender_ttl = 255; // hardcoded TTL, можно считать через IP_RECVTTL
-        memset(response.padding, 0, sizeof(response.padding));
-
-        sendto(sockfd, &response, sizeof(response), 0, (sockaddr*)&client_addr, addr_len);
+    } catch (std::exception& e) {
+        std::cerr << "Ошибка: " << e.what() << std::endl;
     }
 
-    close(sockfd);
     return 0;
 }
 
