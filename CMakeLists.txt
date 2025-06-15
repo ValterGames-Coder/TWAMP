@@ -1,12 +1,21 @@
 cmake_minimum_required(VERSION 3.10)
-project(TWAMP VERSION 1.0 LANGUAGES CXX)
+project(twamp-server LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-add_executable(twamp
-    main.cpp
-    Daemon.cpp
+include_directories(${PROJECT_SOURCE_DIR}/include)
+
+add_executable(twamp-server
+    src/main.cpp
+    src/Daemonize.cpp
+    src/TwampControlServer.cpp
+    src/SessionReflector.cpp
 )
 
-target_compile_options(twamp PRIVATE -Wall -Wextra -Wpedantic)
+target_link_libraries(twamp-server
+    pthread
+)
+
+install(TARGETS twamp-server DESTINATION /usr/bin)
+install(FILES service/twamp-server.service DESTINATION /etc/systemd/system)

@@ -1,0 +1,12 @@
+[Unit]
+Description=TWAMP Server Daemon
+After=network.target
+
+[Service]
+Type=forking
+PIDFile=/run/twamp-server.pid
+ExecStart=/usr/bin/twamp-server
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
