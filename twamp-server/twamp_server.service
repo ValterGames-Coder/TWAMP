@@ -1,0 +1,13 @@
+[Unit]
+Description=TWAMP Server Daemon
+After=network.target
+
+[Service]
+ExecStart=/usr/local/bin/twamp_server
+Restart=on-failure
+User=nobody
+Group=nogroup
+
+[Install]
+WantedBy=multi-user.target
+
