@@ -1,0 +1,16 @@
+[Unit]
+Description=TWAMP Server (RFC 5357, RFC 4656)
+After=network.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+Restart=always
+RestartSec=1
+User=root
+ExecStart=/usr/local/bin/twamp-server --foreground
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
