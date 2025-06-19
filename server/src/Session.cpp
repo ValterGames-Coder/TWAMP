@@ -87,8 +87,6 @@ bool Session::isExpired() const {
 }
 
 bool Session::matchesTestAddress(const struct sockaddr_in& addr) const {
-    // FIXED: Match based on client's source IP, not the stored port
-    // The client sends from a dynamic port to our test port, so we match by IP
     return testActive_ && addr.sin_addr.s_addr == testClientAddr_.sin_addr.s_addr;
 }
 
@@ -118,7 +116,6 @@ void Session::processTestPacket(const char* data, size_t size, const struct sock
 std::vector<char> Session::generateReflectorPacket(const char* data, size_t size, const sockaddr_in& fromAddr) {
     std::vector<char> packet(data, data + size);
     
-    // For TWAMP reflector packets, we need to add receive and transmit timestamps
     if (size >= 64) {  // Standard TWAMP test packet size
         // Get current time in NTP format
         auto now = std::chrono::system_clock::now();
@@ -133,13 +130,8 @@ std::vector<char> Session::generateReflectorPacket(const char* data, size_t size
         memcpy(&packet[16], &secs, 4);
         memcpy(&packet[20], &frac, 4);
         
-        // Transmit timestamp (bytes 24-31) - when we're sending it back
-        // For simplicity, use the same timestamp (processing time is minimal)
         memcpy(&packet[24], &secs, 4);
         memcpy(&packet[28], &frac, 4);
-        
-        // Sequence number is already in the packet (bytes 0-3)
-        // Sender timestamp is already in the packet (bytes 8-15)
     }
     
     return packet;
@@ -209,23 +201,6 @@ void Session::sendControlMessage(const std::vector<char>& message) {
     if (send(controlSocket_, message.data(), message.size(), 0) != static_cast<ssize_t>(message.size())) {
         throw std::runtime_error("Failed to send control message");
     }
-}
-
-// Remove unused methods
-void Session::handleSetUpResponse() {
-    // Not used in this implementation
-}
-
-void Session::handleServerStart() {
-    // Not used in this implementation
-}
-
-void Session::handleAcceptSession() {
-    // Not used in this implementation
-}
-
-void Session::handleFetchSession() {
-    // Not used in this implementation
 }
 
 std::vector<char> Session::receiveControlMessage(size_t expectedSize) {

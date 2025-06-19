@@ -48,7 +48,6 @@ bool Client::runTest(int packetCount, int intervalMs)
             return false;
         }
 
-        // Close connections gracefully
         if (controlSocket_ != -1)
         {
             shutdown(controlSocket_, SHUT_RDWR);
@@ -70,7 +69,6 @@ bool Client::runTest(int packetCount, int intervalMs)
 
 bool Client::connectToServer()
 {
-    // Resolve server address
     memset(&serverAddr_, 0, sizeof(serverAddr_));
     serverAddr_.sin_family = AF_INET;
     serverAddr_.sin_port = htons(controlPort_);
@@ -84,7 +82,6 @@ bool Client::connectToServer()
         return false;
     }
 
-    // Create control socket
     controlSocket_ = socket(AF_INET, SOCK_STREAM, 0);
     if (controlSocket_ < 0)
     {
@@ -105,7 +102,6 @@ bool Client::connectToServer()
         return false;
     }
 
-    // Create test socket
     testSocket_ = socket(AF_INET, SOCK_DGRAM, 0);
     if (testSocket_ < 0)
     {
@@ -145,7 +141,6 @@ bool Client::performControlConnection()
             throw std::runtime_error("Unsupported server mode");
         }
 
-        // Send client greeting
         std::vector<char> clientGreeting(12, 0);
         clientGreeting[3] = 1; // Unauthenticated mode
 
@@ -175,20 +170,17 @@ bool Client::setupTestSession()
 {
     try
     {
-        // Set timeouts
         struct timeval tv;
         tv.tv_sec = 10;
         tv.tv_usec = 0;
         setsockopt(controlSocket_, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
         setsockopt(controlSocket_, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 
-        // Generate random SID
         std::random_device rd;
         std::mt19937 gen(rd());
         std::uniform_int_distribution<uint32_t> dis;
         sid_ = dis(gen);
 
-        // Bind test socket to get a local port
         struct sockaddr_in localAddr;
         memset(&localAddr, 0, sizeof(localAddr));
         localAddr.sin_family = AF_INET;
@@ -204,7 +196,6 @@ bool Client::setupTestSession()
             return false;
         }
 
-        // Get the actual assigned port and address
         socklen_t len = sizeof(localAddr);
         if (getsockname(testSocket_, (struct sockaddr *)&localAddr, &len) < 0)
         {
@@ -215,7 +206,6 @@ bool Client::setupTestSession()
             return false;
         }
 
-        // Get the actual local IP address by connecting temporarily
         struct sockaddr_in tempAddr;
         memset(&tempAddr, 0, sizeof(tempAddr));
         tempAddr.sin_family = AF_INET;
@@ -236,7 +226,6 @@ bool Client::setupTestSession()
             close(tempSocket);
         }
 
-        // If we still don't have a valid address, use loopback
         if (localAddr.sin_addr.s_addr == 0)
         {
             localAddr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
@@ -388,7 +377,6 @@ bool Client::sendTestPackets(int packetCount, int intervalMs)
     double total_back = 0;
     int successCount = 0;
 
-    // Set up server address for test packets
     struct sockaddr_in testServerAddr;
     memset(&testServerAddr, 0, sizeof(testServerAddr));
     testServerAddr.sin_family = AF_INET;
@@ -421,7 +409,6 @@ bool Client::sendTestPackets(int packetCount, int intervalMs)
         // Store send time for RTT calculation
         auto send_time = std::chrono::steady_clock::now();
 
-        // Send test packet
         ssize_t sent = sendto(testSocket_, testPacket.data(), testPacket.size(), 0,
                               (struct sockaddr *)&testServerAddr, sizeof(testServerAddr));
 
@@ -434,12 +421,10 @@ bool Client::sendTestPackets(int packetCount, int intervalMs)
             return false;
         }
 
-        // Wait for response with longer timeout
         char response[1024];
         struct sockaddr_in fromAddr;
         socklen_t fromLen = sizeof(fromAddr);
 
-        // Set timeout for response
         struct timeval timeout;
         timeout.tv_sec = 2; // Increased timeout
         timeout.tv_usec = 0;
@@ -453,7 +438,6 @@ bool Client::sendTestPackets(int packetCount, int intervalMs)
             auto recv_time = std::chrono::steady_clock::now();
             auto rtt = std::chrono::duration_cast<std::chrono::microseconds>(recv_time - send_time);
 
-            // Parse NTP timestamps from response (if >= 32 bytes)
             if (received >= 32)
             {
                 uint32_t t1_secs, t1_frac;
@@ -487,7 +471,7 @@ bool Client::sendTestPackets(int packetCount, int intervalMs)
                                   << "T1=" << T1 << ", T2=" << T2
                                   << ", T3=" << T3 << ", T4=" << T4 << std::endl;
                     }
-                    continue; // Пропустить пакет с некорректными метками
+                    continue;
                 }
                 double out_time = (T2 - T1) * 1000.0;
                 double back_time = (T4 - T3) * 1000.0;

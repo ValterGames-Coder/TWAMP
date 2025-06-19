@@ -19,13 +19,9 @@ public:
     void processTestPacket(const char* data, size_t size, const struct sockaddr_in& fromAddr);
     
 private:
-    void handleSetUpResponse();
-    void handleServerStart();
     void handleRequestSession(const std::vector<char>& message);
-    void handleAcceptSession();
     void handleStartSessions();
     void handleStopSessions();
-    void handleFetchSession();
     
     int controlSocket_;
     int testSocket_;

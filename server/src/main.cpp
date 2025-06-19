@@ -25,7 +25,7 @@ int main(int argc, char* argv[]) {
         if (pid < 0) exit(EXIT_FAILURE);
         if (pid > 0) exit(EXIT_SUCCESS);
         
-        umask(0);  // Теперь будет работать
+        umask(0);
         setsid();
         chdir("/");
         

@@ -46,16 +46,23 @@ bool ClientSession::stop() {
 }
 
 void ClientSession::fillTimestamp(std::vector<char>& packet, size_t offset) {
-    auto now = std::chrono::system_clock::now();
+    using namespace std::chrono;
+    
+    auto now = system_clock::now();
     auto since_epoch = now.time_since_epoch();
-    auto seconds = std::chrono::duration_cast<std::chrono::seconds>(since_epoch);
-    auto microseconds = std::chrono::duration_cast<std::chrono::microseconds>(since_epoch - seconds);
     
-    uint32_t secs = htonl(static_cast<uint32_t>(seconds.count() + 2208988800UL));
-    uint32_t frac = htonl(static_cast<uint32_t>((microseconds.count() << 32) / 1000000));
+    auto secs_duration = duration_cast<seconds>(since_epoch);
+    auto micros_duration = duration_cast<microseconds>(since_epoch - secs_duration);
     
-    memcpy(&packet[offset], &secs, 4);
-    memcpy(&packet[offset + 4], &frac, 4);
+    uint32_t ntp_seconds = static_cast<uint32_t>(secs_duration.count()) + 2208988800UL;
+    uint32_t ntp_fraction = static_cast<uint32_t>(
+        (static_cast<uint64_t>(micros_duration.count()) << 32) / 1000000);
+    
+    uint32_t net_seconds = htonl(ntp_seconds);
+    uint32_t net_fraction = htonl(ntp_fraction);
+    
+    memcpy(&packet[offset], &net_seconds, 4);
+    memcpy(&packet[offset + 4], &net_fraction, 4);
 }
 
 bool ClientSession::sendTestPacket(uint32_t seqNumber, struct sockaddr_in& serverAddr) {
@@ -79,7 +86,6 @@ bool ClientSession::receiveTestPacket(double& latencyMs) {
     struct sockaddr_in fromAddr;
     socklen_t fromAddrLen = sizeof(fromAddr);
     
-    // Установка таймаута
     struct timeval tv;
     tv.tv_sec = 2;
     tv.tv_usec = 0;
@@ -95,7 +101,6 @@ bool ClientSession::receiveTestPacket(double& latencyMs) {
         return false;
     }
     
-    // Используем монотонные часы для точности
     auto recv_time = std::chrono::steady_clock::now();
     
     uint64_t rx_timestamp;
@@ -106,7 +111,6 @@ bool ClientSession::receiveTestPacket(double& latencyMs) {
     
     double rx_time = (rx_secs - 2208988800UL) + (rx_frac / 4294967296.0);
     
-    // Время получения в секундах с высокой точностью
     auto since_epoch = recv_time.time_since_epoch();
     auto seconds = std::chrono::duration_cast<std::chrono::seconds>(since_epoch);
     auto microseconds = std::chrono::duration_cast<std::chrono::microseconds>(since_epoch - seconds);

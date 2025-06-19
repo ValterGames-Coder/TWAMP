@@ -22,7 +22,6 @@ void Server::signalHandler(int signum)
         std::cerr << "Received signal " << signum << ", initiating shutdown..." << std::endl;
         Server::instance->running_ = false;
 
-        // Прерываем блокирующие вызовы
         if (Server::instance->controlSocket_ != -1)
         {
             shutdown(Server::instance->controlSocket_, SHUT_RDWR);
