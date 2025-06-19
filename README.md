@@ -47,12 +47,13 @@ sudo dnf install -y systemd-devel
 ### Clone the Repository
 ```bash
 git clone https://github.com/ValterGames-Coder/TWAMP.git
-cd TWAMP/
+cd TWAMP
 ```
 
 ### Server Installation
 
    ```bash
+   cd server
    mkdir build && cd build
    cmake ..
    make
@@ -64,6 +65,7 @@ cd TWAMP/
 ### Client Installation
 
    ```bash
+   cd client
    mkdir build && cd build
    cmake ..
    make
