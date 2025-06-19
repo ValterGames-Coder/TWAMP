@@ -87,17 +87,32 @@ bool Session::isExpired() const {
 }
 
 bool Session::matchesTestAddress(const struct sockaddr_in& addr) const {
-    return testActive_ && 
-           addr.sin_addr.s_addr == testClientAddr_.sin_addr.s_addr &&
-           addr.sin_port == testClientAddr_.sin_port;
+    // FIXED: Match based on client's source IP, not the stored port
+    // The client sends from a dynamic port to our test port, so we match by IP
+    return testActive_ && addr.sin_addr.s_addr == testClientAddr_.sin_addr.s_addr;
 }
 
 void Session::processTestPacket(const char* data, size_t size, const struct sockaddr_in& fromAddr) {
-    if (!testActive_) return;
+    if (!testActive_) {
+        std::cout << "Received test packet but session not active" << std::endl;
+        return;
+    }
+    
+    std::cout << "Processing test packet from " << inet_ntoa(fromAddr.sin_addr) 
+              << ":" << ntohs(fromAddr.sin_port) << " (size: " << size << ")" << std::endl;
     
     auto reflectorPacket = generateReflectorPacket(data, size, fromAddr);
-    sendto(testSocket_, reflectorPacket.data(), reflectorPacket.size(), 0,
-          (struct sockaddr*)&testClientAddr_, sizeof(testClientAddr_));
+    
+    // Send back to the client's source address and port
+    ssize_t sent = sendto(testSocket_, reflectorPacket.data(), reflectorPacket.size(), 0,
+                         (struct sockaddr*)&fromAddr, sizeof(fromAddr));
+    
+    if (sent < 0) {
+        std::cerr << "Failed to send reflector packet: " << strerror(errno) << std::endl;
+    } else {
+        std::cout << "Sent reflector packet back to " << inet_ntoa(fromAddr.sin_addr) 
+                  << ":" << ntohs(fromAddr.sin_port) << " (" << sent << " bytes)" << std::endl;
+    }
 }
 
 std::vector<char> Session::generateReflectorPacket(const char* data, size_t size, const sockaddr_in& fromAddr) {
@@ -114,13 +129,17 @@ std::vector<char> Session::generateReflectorPacket(const char* data, size_t size
         uint32_t secs = htonl(static_cast<uint32_t>(seconds.count() + 2208988800UL));  // NTP epoch
         uint32_t frac = htonl(static_cast<uint32_t>((microseconds.count() << 32) / 1000000));
         
-        // Receive timestamp (bytes 32-39)
-        memcpy(&packet[32], &secs, 4);
-        memcpy(&packet[36], &frac, 4);
+        // Receive timestamp (bytes 16-23) - when we received the packet
+        memcpy(&packet[16], &secs, 4);
+        memcpy(&packet[20], &frac, 4);
         
-        // Transmit timestamp (bytes 40-47) - use same time for simplicity
-        memcpy(&packet[40], &secs, 4);
-        memcpy(&packet[44], &frac, 4);
+        // Transmit timestamp (bytes 24-31) - when we're sending it back
+        // For simplicity, use the same timestamp (processing time is minimal)
+        memcpy(&packet[24], &secs, 4);
+        memcpy(&packet[28], &frac, 4);
+        
+        // Sequence number is already in the packet (bytes 0-3)
+        // Sender timestamp is already in the packet (bytes 8-15)
     }
     
     return packet;
@@ -132,15 +151,15 @@ void Session::handleRequestSession(const std::vector<char>& message) {
         sid_ = ntohl(*reinterpret_cast<const uint32_t*>(&message[11]));
         
         // Parse test client port from bytes 19-20 (adjusted for removed command byte)
-        uint16_t clientPort = ntohs(*reinterpret_cast<const uint16_t*>(&message[19]));
+        uint16_t clientPort = *reinterpret_cast<const uint16_t*>(&message[19]); // Keep in network order
         
         // Parse client IP from bytes 23-26 (adjusted for removed command byte)  
-        uint32_t clientIP = *reinterpret_cast<const uint32_t*>(&message[23]);
+        uint32_t clientIP = *reinterpret_cast<const uint32_t*>(&message[23]); // Keep in network order
         
-        // Set up test client address
+        // Set up test client address - store the client's address for matching
         testClientAddr_.sin_family = AF_INET;
-        testClientAddr_.sin_port = clientPort;  // Already in network order
-        testClientAddr_.sin_addr.s_addr = clientIP;  // Already in network order
+        testClientAddr_.sin_port = clientPort;  // Client's port
+        testClientAddr_.sin_addr.s_addr = clientIP;  // Client's IP
         
         std::cout << "Request-Session: SID=" << sid_ 
                   << ", Client=" << inet_ntoa(testClientAddr_.sin_addr) 
@@ -161,7 +180,7 @@ void Session::handleRequestSession(const std::vector<char>& message) {
 }
 
 void Session::handleStartSessions() {
-    std::cout << "Start-Sessions received" << std::endl;
+    std::cout << "Start-Sessions received for SID=" << sid_ << std::endl;
     
     // Send Start-Ack (12 bytes)
     std::vector<char> startAck(12, 0);
@@ -170,11 +189,11 @@ void Session::handleStartSessions() {
     sendControlMessage(startAck);
     
     testActive_ = true;
-    std::cout << "Test session activated" << std::endl;
+    std::cout << "Test session activated for client " << inet_ntoa(testClientAddr_.sin_addr) << std::endl;
 }
 
 void Session::handleStopSessions() {
-    std::cout << "Stop-Sessions received" << std::endl;
+    std::cout << "Stop-Sessions received for SID=" << sid_ << std::endl;
     
     // Send Stop-Ack (12 bytes)
     std::vector<char> stopAck(12, 0);
@@ -183,7 +202,7 @@ void Session::handleStopSessions() {
     sendControlMessage(stopAck);
     
     testActive_ = false;
-    std::cout << "Test session stopped" << std::endl;
+    std::cout << "Test session stopped for SID=" << sid_ << std::endl;
 }
 
 void Session::sendControlMessage(const std::vector<char>& message) {

@@ -281,20 +281,22 @@ bool Client::sendTestPackets(int packetCount, int intervalMs) {
     // Prepare test packet (64 bytes as per TWAMP specification)
     std::vector<char> testPacket(64, 0);
     
-    // Set up server address for test packets
+    // Set up server address for test packets - THIS IS THE KEY FIX
+    // Send test packets to the server's test port, not client port
     struct sockaddr_in testServerAddr;
     memset(&testServerAddr, 0, sizeof(testServerAddr));
     testServerAddr.sin_family = AF_INET;
-    testServerAddr.sin_port = htons(testPort_);
-    testServerAddr.sin_addr = serverAddr_.sin_addr;
+    testServerAddr.sin_port = htons(testPort_);  // Server's test port
+    testServerAddr.sin_addr = serverAddr_.sin_addr;  // Server's IP
     
-    std::cout << "Sending " << packetCount << " test packets..." << std::endl;
+    std::cout << "Sending " << packetCount << " test packets to " 
+              << inet_ntoa(testServerAddr.sin_addr) << ":" << ntohs(testServerAddr.sin_port) << std::endl;
     
     for (int i = 0; i < packetCount; i++) {
         // Fill sequence number (bytes 0-3)
         *reinterpret_cast<uint32_t*>(&testPacket[0]) = htonl(i + 1);
         
-        // Add timestamp (bytes 4-11)
+        // Add sender timestamp (bytes 8-15) - TWAMP uses this format
         auto now = std::chrono::system_clock::now();
         auto since_epoch = now.time_since_epoch();
         auto seconds = std::chrono::duration_cast<std::chrono::seconds>(since_epoch);
@@ -303,36 +305,44 @@ bool Client::sendTestPackets(int packetCount, int intervalMs) {
         uint32_t secs = htonl(static_cast<uint32_t>(seconds.count() + 2208988800UL));  // NTP epoch
         uint32_t frac = htonl(static_cast<uint32_t>((microseconds.count() << 32) / 1000000));
         
-        memcpy(&testPacket[4], &secs, 4);
-        memcpy(&testPacket[8], &frac, 4);
+        memcpy(&testPacket[8], &secs, 4);   // Sender timestamp seconds
+        memcpy(&testPacket[12], &frac, 4);  // Sender timestamp fraction
+        
+        // Store send time for RTT calculation
+        auto send_time = std::chrono::steady_clock::now();
         
         // Send test packet
         ssize_t sent = sendto(testSocket_, testPacket.data(), testPacket.size(), 0,
                              (struct sockaddr*)&testServerAddr, sizeof(testServerAddr));
         
         if (sent != static_cast<ssize_t>(testPacket.size())) {
-            std::cerr << "Failed to send test packet " << (i + 1) << std::endl;
+            std::cerr << "Failed to send test packet " << (i + 1) << ": " << strerror(errno) << std::endl;
             return false;
         }
         
-        // Wait for response (optional - for RTT measurement)
+        // Wait for response with longer timeout
         char response[1024];
         struct sockaddr_in fromAddr;
         socklen_t fromLen = sizeof(fromAddr);
         
-        // Set a short timeout for response
+        // Set timeout for response
         struct timeval timeout;
-        timeout.tv_sec = 0;
-        timeout.tv_usec = 100000; // 100ms
+        timeout.tv_sec = 2;     // Increased timeout
+        timeout.tv_usec = 0;
         setsockopt(testSocket_, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
         
         ssize_t received = recvfrom(testSocket_, response, sizeof(response), 0,
                                    (struct sockaddr*)&fromAddr, &fromLen);
         
         if (received > 0) {
-            std::cout << "Packet " << (i + 1) << " - Response received (" << received << " bytes)" << std::endl;
+            auto recv_time = std::chrono::steady_clock::now();
+            auto rtt = std::chrono::duration_cast<std::chrono::microseconds>(recv_time - send_time);
+            
+            std::cout << "Packet " << (i + 1) << " - Response received (" << received 
+                      << " bytes) RTT: " << rtt.count() / 1000.0 << " ms from " 
+                      << inet_ntoa(fromAddr.sin_addr) << ":" << ntohs(fromAddr.sin_port) << std::endl;
         } else {
-            std::cout << "Packet " << (i + 1) << " - No response" << std::endl;
+            std::cout << "Packet " << (i + 1) << " - No response (timeout)" << std::endl;
         }
         
         if (i < packetCount - 1) {
