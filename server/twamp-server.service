@@ -1,5 +1,5 @@
 [Unit]
-Description=TWAMP Server (RFC 5357, RFC 4656)
+Description=TWAMP Daemon Server
 After=network.target
 StartLimitIntervalSec=0
 

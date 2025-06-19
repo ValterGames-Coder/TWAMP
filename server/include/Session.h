@@ -21,7 +21,7 @@ public:
 private:
     void handleSetUpResponse();
     void handleServerStart();
-    void handleRequestSession();
+    void handleRequestSession(const std::vector<char>& message);
     void handleAcceptSession();
     void handleStartSessions();
     void handleStopSessions();

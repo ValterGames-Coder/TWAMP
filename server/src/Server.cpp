@@ -33,6 +33,9 @@ bool Server::start() {
     testThread_ = std::thread(&Server::testServerThread, this);
     cleanupThread_ = std::thread(&Server::sessionCleanupThread, this);
     
+    std::cout << "TWAMP Server started on control port " << config_.getInt("control_port", 862) 
+              << ", test port " << config_.getInt("test_port", 863) << std::endl;
+    
     return true;
 }
 
@@ -63,23 +66,6 @@ void Server::stop() {
     
     std::lock_guard<std::mutex> lock(sessionsMutex_);
     activeSessions_.clear();
-}
-
-std::string Server::generateServerGreeting() const {
-    std::string greeting(12, 0);
-    
-    // First 4 bytes: modes (we support unauthenticated mode only)
-    greeting[3] = 1;  // Mode 1 (unauthenticated)
-    
-    // Next 4 bytes: server identifier (random number)
-    std::random_device rd;
-    std::mt19937 gen(rd());
-    std::uniform_int_distribution<uint32_t> dis;
-    uint32_t serverId = dis(gen);
-    
-    memcpy(&greeting[4], &serverId, sizeof(serverId));
-    
-    return greeting;
 }
 
 bool Server::setupControlSocket() {
@@ -146,6 +132,7 @@ void Server::controlServerThread() {
             continue;
         }
         
+        std::cout << "New control connection from " << inet_ntoa(clientAddr.sin_addr) << std::endl;
         std::thread(&Server::handleControlConnection, this, clientSocket).detach();
     }
 }
@@ -187,6 +174,7 @@ void Server::sessionCleanupThread() {
         auto it = activeSessions_.begin();
         while (it != activeSessions_.end()) {
             if ((*it)->isExpired()) {
+                std::cout << "Cleaning up expired session" << std::endl;
                 it = activeSessions_.erase(it);
             } else {
                 ++it;
@@ -195,33 +183,51 @@ void Server::sessionCleanupThread() {
     }
 }
 
-void Session::handleRequestSession() {
+void Server::handleControlConnection(int clientSocket) {
     try {
-        // Принимаем сообщение (27 байт после байта команды)
-        auto message = receiveControlMessage(27);
+        // Send server greeting first
+        std::vector<char> serverGreeting(12, 0);
+        serverGreeting[3] = 1;  // Mode 1 (unauthenticated)
         
-        // Полное сообщение = 1 байт команды + 27 байт данных
-        std::vector<char> fullMessage(28);
-        fullMessage[0] = 1; // Команда
-        std::copy(message.begin(), message.end(), fullMessage.begin() + 1);
+        // Add server identifier (random number)
+        std::random_device rd;
+        std::mt19937 gen(rd());
+        std::uniform_int_distribution<uint32_t> dis;
+        uint32_t serverId = htonl(dis(gen));
+        memcpy(&serverGreeting[4], &serverId, sizeof(serverId));
         
-        // Парсим SID
-        sid_ = ntohl(*reinterpret_cast<uint32_t*>(&fullMessage[12]));
+        if (send(clientSocket, serverGreeting.data(), serverGreeting.size(), 0) != 
+            static_cast<ssize_t>(serverGreeting.size())) {
+            throw std::runtime_error("Failed to send server greeting");
+        }
         
-        // Парсим порт и адрес клиента
-        testClientAddr_.sin_family = AF_INET;
-        testClientAddr_.sin_port = htons(ntohs(*reinterpret_cast<uint16_t*>(&fullMessage[20])));
-        testClientAddr_.sin_addr.s_addr = *reinterpret_cast<uint32_t*>(&fullMessage[24]);
+        // Receive client greeting
+        std::vector<char> clientGreeting(12);
+        if (recv(clientSocket, clientGreeting.data(), clientGreeting.size(), MSG_WAITALL) != 
+            static_cast<ssize_t>(clientGreeting.size())) {
+            throw std::runtime_error("Failed to receive client greeting");
+        }
         
-        // Отправляем Accept-Session
-        std::vector<char> acceptMessage(28, 0);
-        *reinterpret_cast<uint32_t*>(&acceptMessage[12]) = htonl(sid_);
-        acceptMessage[16] = 0; // Accept
+        // Check client mode
+        if (clientGreeting[3] != 1) {
+            throw std::runtime_error("Unsupported client mode");
+        }
         
-        sendControlMessage(acceptMessage);
+        std::cout << "Control handshake completed" << std::endl;
+        
+        // Create session and add to active sessions
+        auto session = std::make_shared<Session>(clientSocket, testSocket_);
+        
+        {
+            std::lock_guard<std::mutex> lock(sessionsMutex_);
+            activeSessions_.push_back(session);
+        }
+        
+        // Run session (this will block until session ends)
+        session->run();
         
     } catch (const std::exception& e) {
-        std::cerr << "Request-Session error: " << e.what() << std::endl;
-        throw;
+        std::cerr << "Control connection error: " << e.what() << std::endl;
+        close(clientSocket);
     }
 }

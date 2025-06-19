@@ -40,6 +40,13 @@ bool Client::runTest(int packetCount, int intervalMs) {
             return false;
         }
         
+        // Close connections gracefully
+        if (controlSocket_ != -1) {
+            shutdown(controlSocket_, SHUT_RDWR);
+            close(controlSocket_);
+            controlSocket_ = -1;
+        }
+        
         return true;
         
     } catch (const std::exception& e) {
@@ -84,34 +91,36 @@ bool Client::connectToServer() {
 
 bool Client::performControlConnection() {
     try {
-        // 1. Set socket timeout
+        // Set socket timeout
         struct timeval tv;
         tv.tv_sec = 5;
         tv.tv_usec = 0;
         setsockopt(controlSocket_, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+        setsockopt(controlSocket_, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 
-        // 2. Send client greeting
-        std::vector<char> greeting(12, 0);
-        greeting[3] = 1;  // Unauthenticated mode
-        
-        if (send(controlSocket_, greeting.data(), greeting.size(), MSG_NOSIGNAL) != 
-            static_cast<ssize_t>(greeting.size())) {
-            throw std::runtime_error("Failed to send client greeting");
-        }
-
-        // 3. Receive server greeting
+        // Receive server greeting first (server sends first)
         std::vector<char> serverGreeting(12);
-        ssize_t received = recv(controlSocket_, serverGreeting.data(), serverGreeting.size(), 0);
+        ssize_t received = recv(controlSocket_, serverGreeting.data(), serverGreeting.size(), MSG_WAITALL);
         
         if (received != static_cast<ssize_t>(serverGreeting.size())) {
-            throw std::runtime_error(strerror(errno));
+            throw std::runtime_error("Failed to receive server greeting");
         }
 
-        // 4. Verify server mode
+        // Verify server mode
         if (serverGreeting[3] != 1) {
             throw std::runtime_error("Unsupported server mode");
         }
 
+        // Send client greeting
+        std::vector<char> clientGreeting(12, 0);
+        clientGreeting[3] = 1;  // Unauthenticated mode
+        
+        if (send(controlSocket_, clientGreeting.data(), clientGreeting.size(), 0) != 
+            static_cast<ssize_t>(clientGreeting.size())) {
+            throw std::runtime_error("Failed to send client greeting");
+        }
+
+        std::cout << "Control connection established" << std::endl;
         return true;
         
     } catch (const std::exception& e) {
@@ -121,71 +130,105 @@ bool Client::performControlConnection() {
 }
 
 bool Client::setupTestSession() {
-    // Установка таймаутов
-    struct timeval tv;
-    tv.tv_sec = 10; // Увеличиваем таймаут до 10 секунд
-    tv.tv_usec = 0;
-    
-    setsockopt(controlSocket_, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    setsockopt(controlSocket_, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
-    
-    // Send Request-Session (28 bytes)
-    std::vector<char> requestSession(28, 0);
-    requestSession[0] = 1;  // Request-Session command
-    
-    // Generate random SID
-    std::random_device rd;
-    std::mt19937 gen(rd());
-    std::uniform_int_distribution<uint32_t> dis;
-    sid_ = dis(gen);
-    
-    *reinterpret_cast<uint32_t*>(&requestSession[12]) = htonl(sid_);  // SID
-    
-    // Set test port
-    struct sockaddr_in localAddr;
-    socklen_t len = sizeof(localAddr);
-    if (getsockname(testSocket_, (struct sockaddr*)&localAddr, &len) < 0) {
-        std::cerr << "Failed to get socket name: " << strerror(errno) << std::endl;
+    try {
+        // Set timeouts
+        struct timeval tv;
+        tv.tv_sec = 10;
+        tv.tv_usec = 0;
+        setsockopt(controlSocket_, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+        setsockopt(controlSocket_, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+        
+        // Generate random SID
+        std::random_device rd;
+        std::mt19937 gen(rd());
+        std::uniform_int_distribution<uint32_t> dis;
+        sid_ = dis(gen);
+        
+        // Bind test socket to get a local port
+        struct sockaddr_in localAddr;
+        memset(&localAddr, 0, sizeof(localAddr));
+        localAddr.sin_family = AF_INET;
+        localAddr.sin_addr.s_addr = htonl(INADDR_ANY);
+        localAddr.sin_port = 0;  // Let system choose port
+        
+        if (bind(testSocket_, (struct sockaddr*)&localAddr, sizeof(localAddr)) < 0) {
+            std::cerr << "Failed to bind test socket: " << strerror(errno) << std::endl;
+            return false;
+        }
+        
+        // Get the actual assigned port and address
+        socklen_t len = sizeof(localAddr);
+        if (getsockname(testSocket_, (struct sockaddr*)&localAddr, &len) < 0) {
+            std::cerr << "Failed to get socket name: " << strerror(errno) << std::endl;
+            return false;
+        }
+        
+        // Get the actual local IP address by connecting temporarily
+        struct sockaddr_in tempAddr;
+        memset(&tempAddr, 0, sizeof(tempAddr));
+        tempAddr.sin_family = AF_INET;
+        tempAddr.sin_port = htons(1);  // Dummy port
+        tempAddr.sin_addr = serverAddr_.sin_addr;
+        
+        int tempSocket = socket(AF_INET, SOCK_DGRAM, 0);
+        if (tempSocket >= 0) {
+            if (connect(tempSocket, (struct sockaddr*)&tempAddr, sizeof(tempAddr)) == 0) {
+                socklen_t tempLen = sizeof(tempAddr);
+                if (getsockname(tempSocket, (struct sockaddr*)&tempAddr, &tempLen) == 0) {
+                    localAddr.sin_addr = tempAddr.sin_addr;
+                }
+            }
+            close(tempSocket);
+        }
+        
+        // If we still don't have a valid address, use loopback
+        if (localAddr.sin_addr.s_addr == 0) {
+            localAddr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        }
+        
+        // Send Request-Session (28 bytes)
+        std::vector<char> requestSession(28, 0);
+        requestSession[0] = 1;  // Request-Session command
+        
+        *reinterpret_cast<uint32_t*>(&requestSession[12]) = htonl(sid_);  // SID
+        *reinterpret_cast<uint16_t*>(&requestSession[20]) = localAddr.sin_port; // Keep in network order
+        *reinterpret_cast<uint32_t*>(&requestSession[24]) = localAddr.sin_addr.s_addr; // Keep in network order
+        
+        ssize_t sent = send(controlSocket_, requestSession.data(), requestSession.size(), 0);
+        if (sent != static_cast<ssize_t>(requestSession.size())) {
+            std::cerr << "Failed to send Request-Session: " << strerror(errno) << std::endl;
+            return false;
+        }
+        
+        std::cout << "Sent Request-Session with SID=" << sid_ 
+                  << ", port=" << ntohs(localAddr.sin_port) 
+                  << ", addr=" << inet_ntoa(localAddr.sin_addr) << std::endl;
+        
+        // Receive Accept-Session (28 bytes)
+        std::vector<char> acceptSession(28);
+        ssize_t received = recv(controlSocket_, acceptSession.data(), acceptSession.size(), MSG_WAITALL);
+        
+        if (received != static_cast<ssize_t>(acceptSession.size())) {
+            std::cerr << "Failed to receive Accept-Session: " 
+                      << (received > 0 ? "incomplete" : strerror(errno)) 
+                      << std::endl;
+            return false;
+        }
+        
+        // Check if session was accepted (byte 16 should be 0)
+        if (acceptSession[16] != 0) {
+            std::cerr << "Session was not accepted by server (code: " 
+                      << static_cast<int>(acceptSession[16]) << ")" << std::endl;
+            return false;
+        }
+        
+        std::cout << "Session accepted by server" << std::endl;
+        return true;
+        
+    } catch (const std::exception& e) {
+        std::cerr << "Setup test session error: " << e.what() << std::endl;
         return false;
     }
-    *reinterpret_cast<uint16_t*>(&requestSession[20]) = htons(ntohs(localAddr.sin_port));
-    
-    // Set client IP (use local address)
-    *reinterpret_cast<uint32_t*>(&requestSession[24]) = localAddr.sin_addr.s_addr;
-    
-    // Send with timeout
-    struct timeval tv;
-    tv.tv_sec = 5;
-    tv.tv_usec = 0;
-    setsockopt(controlSocket_, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
-    
-    ssize_t sent = send(controlSocket_, requestSession.data(), requestSession.size(), 0);
-    if (sent != static_cast<ssize_t>(requestSession.size())) {
-        std::cerr << "Failed to send Request-Session: " << strerror(errno) << std::endl;
-        return false;
-    }
-    
-    // Receive with timeout
-    setsockopt(controlSocket_, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    
-    std::vector<char> acceptSession(28);
-    ssize_t received = recv(controlSocket_, acceptSession.data(), acceptSession.size(), 0);
-    
-    if (received != static_cast<ssize_t>(acceptSession.size())) {
-        std::cerr << "Failed to receive Accept-Session: " 
-                  << (received > 0 ? "incomplete" : strerror(errno)) 
-                  << std::endl;
-        return false;
-    }
-    
-    // Check if session was accepted (byte 16 should be 0)
-    if (acceptSession[16] != 0) {
-        std::cerr << "Session was not accepted by server (code: " 
-                  << static_cast<int>(acceptSession[16]) << ")" << std::endl;
-        return false;
-    }
-    
-    return true;
 }
 
 bool Client::startTestSession() {
@@ -193,18 +236,21 @@ bool Client::startTestSession() {
     std::vector<char> startSessions(12, 0);
     startSessions[0] = 7;  // Start-Sessions command
     
-    if (send(controlSocket_, startSessions.data(), startSessions.size(), 0) != startSessions.size()) {
+    if (send(controlSocket_, startSessions.data(), startSessions.size(), 0) != 
+        static_cast<ssize_t>(startSessions.size())) {
         std::cerr << "Failed to send Start-Sessions" << std::endl;
         return false;
     }
     
     // Receive Start-Ack (12 bytes)
     std::vector<char> startAck(12);
-    if (recv(controlSocket_, startAck.data(), startAck.size(), MSG_WAITALL) != startAck.size()) {
+    if (recv(controlSocket_, startAck.data(), startAck.size(), MSG_WAITALL) != 
+        static_cast<ssize_t>(startAck.size())) {
         std::cerr << "Failed to receive Start-Ack" << std::endl;
         return false;
     }
     
+    std::cout << "Test session started" << std::endl;
     return true;
 }
 
@@ -213,92 +259,96 @@ bool Client::stopTestSession() {
     std::vector<char> stopSessions(12, 0);
     stopSessions[0] = 4;  // Stop-Sessions command
     
-    if (send(controlSocket_, stopSessions.data(), stopSessions.size(), 0) != stopSessions.size()) {
+    if (send(controlSocket_, stopSessions.data(), stopSessions.size(), 0) != 
+        static_cast<ssize_t>(stopSessions.size())) {
         std::cerr << "Failed to send Stop-Sessions" << std::endl;
         return false;
     }
     
     // Receive Stop-Ack (12 bytes)
     std::vector<char> stopAck(12);
-    if (recv(controlSocket_, stopAck.data(), stopAck.size(), MSG_WAITALL) != stopAck.size()) {
+    if (recv(controlSocket_, stopAck.data(), stopAck.size(), MSG_WAITALL) != 
+        static_cast<ssize_t>(stopAck.size())) {
         std::cerr << "Failed to receive Stop-Ack" << std::endl;
         return false;
     }
     
+    std::cout << "Test session stopped" << std::endl;
     return true;
 }
 
 bool Client::sendTestPackets(int packetCount, int intervalMs) {
-    // Prepare test packet (64 bytes as per TWAMP standard)
-    std::vector<char> packet(64, 0);
+    // Prepare test packet (64 bytes as per TWAMP specification)
+    std::vector<char> testPacket(64, 0);
     
-    // Sequence number (bytes 0-3)
-    uint32_t sequenceNumber = 0;
+    // Set up server address for test packets
+    struct sockaddr_in testServerAddr;
+    memset(&testServerAddr, 0, sizeof(testServerAddr));
+    testServerAddr.sin_family = AF_INET;
+    testServerAddr.sin_port = htons(testPort_);
+    testServerAddr.sin_addr = serverAddr_.sin_addr;
     
-    // Timestamp (bytes 8-15 and 16-23 for both timestamp fields)
-    auto fillTimestamp = [](std::vector<char>& pkt, size_t offset) {
+    std::cout << "Sending " << packetCount << " test packets..." << std::endl;
+    
+    for (int i = 0; i < packetCount; i++) {
+        // Fill sequence number (bytes 0-3)
+        *reinterpret_cast<uint32_t*>(&testPacket[0]) = htonl(i + 1);
+        
+        // Add timestamp (bytes 4-11)
         auto now = std::chrono::system_clock::now();
         auto since_epoch = now.time_since_epoch();
         auto seconds = std::chrono::duration_cast<std::chrono::seconds>(since_epoch);
         auto microseconds = std::chrono::duration_cast<std::chrono::microseconds>(since_epoch - seconds);
         
-        uint32_t secs = htonl(seconds.count() + 2208988800UL);  // NTP epoch
+        uint32_t secs = htonl(static_cast<uint32_t>(seconds.count() + 2208988800UL));  // NTP epoch
         uint32_t frac = htonl(static_cast<uint32_t>((microseconds.count() << 32) / 1000000));
         
-        memcpy(&pkt[offset], &secs, 4);
-        memcpy(&pkt[offset + 4], &frac, 4);
-    };
-    
-    // Set test server address (using control port + 1)
-    struct sockaddr_in testServerAddr = serverAddr_;
-    testServerAddr.sin_port = htons(testPort_);
-    
-    for (int i = 0; i < packetCount; ++i) {
-        // Update sequence number
-        *reinterpret_cast<uint32_t*>(&packet[0]) = htonl(sequenceNumber++);
+        memcpy(&testPacket[4], &secs, 4);
+        memcpy(&testPacket[8], &frac, 4);
         
-        // Update timestamps
-        fillTimestamp(packet, 8);  // Timestamp
-        fillTimestamp(packet, 16); // Error estimate (we just use the same timestamp)
+        // Send test packet
+        ssize_t sent = sendto(testSocket_, testPacket.data(), testPacket.size(), 0,
+                             (struct sockaddr*)&testServerAddr, sizeof(testServerAddr));
         
-        // Send packet
-        if (sendto(testSocket_, packet.data(), packet.size(), 0,
-                 (struct sockaddr*)&testServerAddr, sizeof(testServerAddr)) != packet.size()) {
-            std::cerr << "Failed to send test packet " << i << std::endl;
+        if (sent != static_cast<ssize_t>(testPacket.size())) {
+            std::cerr << "Failed to send test packet " << (i + 1) << std::endl;
             return false;
         }
         
-        // Receive reflected packet
-        std::vector<char> reflectedPacket(64);
+        // Wait for response (optional - for RTT measurement)
+        char response[1024];
         struct sockaddr_in fromAddr;
-        socklen_t fromAddrLen = sizeof(fromAddr);
+        socklen_t fromLen = sizeof(fromAddr);
         
-        ssize_t received = recvfrom(testSocket_, reflectedPacket.data(), reflectedPacket.size(), 0,
-                                  (struct sockaddr*)&fromAddr, &fromAddrLen);
+        // Set a short timeout for response
+        struct timeval timeout;
+        timeout.tv_sec = 0;
+        timeout.tv_usec = 100000; // 100ms
+        setsockopt(testSocket_, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
         
-        if (received != reflectedPacket.size()) {
-            std::cerr << "Failed to receive reflected packet " << i << std::endl;
-            return false;
+        ssize_t received = recvfrom(testSocket_, response, sizeof(response), 0,
+                                   (struct sockaddr*)&fromAddr, &fromLen);
+        
+        if (received > 0) {
+            std::cout << "Packet " << (i + 1) << " - Response received (" << received << " bytes)" << std::endl;
+        } else {
+            std::cout << "Packet " << (i + 1) << " - No response" << std::endl;
         }
-        
-        // Calculate latency (simplified)
-        auto now = std::chrono::system_clock::now();
-        auto now_s = std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch());
-        auto now_us = std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch() - now_s);
-        
-        uint32_t rx_secs = ntohl(*reinterpret_cast<uint32_t*>(&reflectedPacket[32]));
-        uint32_t rx_frac = ntohl(*reinterpret_cast<uint32_t*>(&reflectedPacket[36]));
-        
-        double rx_time = (rx_secs - 2208988800UL) + (rx_frac / 4294967296.0);
-        double tx_time = (now_s.count() - 2208988800UL) + (now_us.count() / 1000000.0);
-        double latency = (tx_time - rx_time) * 1000;  // in milliseconds
-        
-        std::cout << "Packet " << i << ": Latency = " << latency << " ms" << std::endl;
         
         if (i < packetCount - 1) {
             std::this_thread::sleep_for(std::chrono::milliseconds(intervalMs));
         }
     }
     
+    std::cout << "Test packets completed" << std::endl;
     return true;
+}
+
+Client::~Client() {
+    if (controlSocket_ != -1) {
+        close(controlSocket_);
+    }
+    if (testSocket_ != -1) {
+        close(testSocket_);
+    }
 }

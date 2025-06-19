@@ -22,41 +22,58 @@ Session::~Session() {
 void Session::run() {
     try {
         while (true) {
-            // First byte is command
-            char command;
-            if (recv(controlSocket_, &command, 1, 0) != 1) {
-                throw std::runtime_error("Failed to receive command");
+            // Read the first byte to determine message type and size
+            char firstByte;
+            ssize_t received = recv(controlSocket_, &firstByte, 1, 0);
+            
+            if (received == 0) {
+                // Client closed connection gracefully
+                std::cout << "Client closed connection" << std::endl;
+                break;
+            } else if (received != 1) {
+                throw std::runtime_error("Failed to receive first byte");
             }
             
             lastActivity_ = std::chrono::steady_clock::now();
             
-            switch (command) {
-                case 2:  // Set-Up-Response
-                    handleSetUpResponse();
+            // Based on first byte, determine message size and read the rest
+            switch (firstByte) {
+                case 1:  // Request-Session (28 bytes total)
+                    {
+                        std::vector<char> message(27);
+                        if (recv(controlSocket_, message.data(), 27, MSG_WAITALL) != 27) {
+                            throw std::runtime_error("Failed to receive Request-Session data");
+                        }
+                        handleRequestSession(message);
+                    }
                     break;
-                case 5:  // Server-Start
-                    handleServerStart();
+                case 7:  // Start-Sessions (12 bytes total)
+                    {
+                        std::vector<char> message(11);
+                        if (recv(controlSocket_, message.data(), 11, MSG_WAITALL) != 11) {
+                            throw std::runtime_error("Failed to receive Start-Sessions data");
+                        }
+                        handleStartSessions();
+                    }
                     break;
-                case 1:  // Request-Session
-                    handleRequestSession();
-                    break;
-                case 3:  // Accept-Session
-                    handleAcceptSession();
-                    break;
-                case 7:  // Start-Sessions
-                    handleStartSessions();
-                    break;
-                case 4:  // Stop-Sessions
-                    handleStopSessions();
-                    break;
-                case 6:  // Fetch-Session
-                    handleFetchSession();
+                case 4:  // Stop-Sessions (12 bytes total)
+                    {
+                        std::vector<char> message(11);
+                        if (recv(controlSocket_, message.data(), 11, MSG_WAITALL) != 11) {
+                            throw std::runtime_error("Failed to receive Stop-Sessions data");
+                        }
+                        handleStopSessions();
+                        // After stop sessions, expect client to close connection
+                        return;
+                    }
                     break;
                 default:
+                    std::cerr << "Unknown command: " << static_cast<int>(firstByte) << std::endl;
                     throw std::runtime_error("Unknown command");
             }
         }
     } catch (const std::exception& e) {
+        std::cerr << "Session error: " << e.what() << std::endl;
         if (testActive_) {
             testActive_ = false;
         }
@@ -86,69 +103,65 @@ void Session::processTestPacket(const char* data, size_t size, const struct sock
 std::vector<char> Session::generateReflectorPacket(const char* data, size_t size, const sockaddr_in& fromAddr) {
     std::vector<char> packet(data, data + size);
     
-    // Для UDP-пакетов TWAMP минимальный размер - 41 байт
-    if (size >= 41) {
-        // Обновляем временные метки
-        struct timespec ts;
-        clock_gettime(CLOCK_REALTIME, &ts);
+    // For TWAMP reflector packets, we need to add receive and transmit timestamps
+    if (size >= 64) {  // Standard TWAMP test packet size
+        // Get current time in NTP format
+        auto now = std::chrono::system_clock::now();
+        auto since_epoch = now.time_since_epoch();
+        auto seconds = std::chrono::duration_cast<std::chrono::seconds>(since_epoch);
+        auto microseconds = std::chrono::duration_cast<std::chrono::microseconds>(since_epoch - seconds);
         
-        uint64_t ntp_ts = ((uint64_t)(ts.tv_sec + 2208988800UL) << 32) |
-                          (uint64_t)((ts.tv_nsec * 4294967296ULL) / 1000000000ULL);
+        uint32_t secs = htonl(static_cast<uint32_t>(seconds.count() + 2208988800UL));  // NTP epoch
+        uint32_t frac = htonl(static_cast<uint32_t>((microseconds.count() << 32) / 1000000));
         
         // Receive timestamp (bytes 32-39)
-        memcpy(&packet[32], &ntp_ts, sizeof(ntp_ts));
+        memcpy(&packet[32], &secs, 4);
+        memcpy(&packet[36], &frac, 4);
         
-        // Transmit timestamp (bytes 40-47)
-        memcpy(&packet[40], &ntp_ts, sizeof(ntp_ts));
+        // Transmit timestamp (bytes 40-47) - use same time for simplicity
+        memcpy(&packet[40], &secs, 4);
+        memcpy(&packet[44], &frac, 4);
     }
     
     return packet;
 }
 
-void Session::handleSetUpResponse() {
-    // Receive Set-Up-Response message (112 bytes)
-    auto message = receiveControlMessage(112);
-    
-    // Just acknowledge it (no specific processing needed in unauthenticated mode)
-}
-
-void Session::handleServerStart() {
-    // Receive Server-Start message (112 bytes)
-    auto message = receiveControlMessage(112);
-    
-    // Just acknowledge it (no specific processing needed in unauthenticated mode)
-}
-
-void Session::handleRequestSession() {
-    // Receive Request-Session message (28 bytes)
-    auto message = receiveControlMessage(28);
-    
-    // Parse SID (Session ID)
-    sid_ = ntohl(*reinterpret_cast<uint32_t*>(&message[12]));
-    
-    // Parse test port and address
-    testClientAddr_.sin_family = AF_INET;
-    testClientAddr_.sin_port = htons(ntohs(*reinterpret_cast<uint16_t*>(&message[20])));
-    testClientAddr_.sin_addr.s_addr = *reinterpret_cast<uint32_t*>(&message[24]);
-    
-    // Send Accept-Session (28 bytes)
-    std::vector<char> acceptMessage(28, 0);
-    *reinterpret_cast<uint32_t*>(&acceptMessage[12]) = htonl(sid_);  // SID
-    acceptMessage[16] = 0;  // Accept (0 means accepted)
-    
-    sendControlMessage(acceptMessage);
-}
-
-void Session::handleAcceptSession() {
-    // Receive Accept-Session message (28 bytes)
-    auto message = receiveControlMessage(28);
-    
-    // Just acknowledge it (no specific processing needed in unauthenticated mode)
+void Session::handleRequestSession(const std::vector<char>& message) {
+    try {
+        // Parse SID from bytes 11-14 (since we already read the command byte)
+        sid_ = ntohl(*reinterpret_cast<const uint32_t*>(&message[11]));
+        
+        // Parse test client port from bytes 19-20 (adjusted for removed command byte)
+        uint16_t clientPort = ntohs(*reinterpret_cast<const uint16_t*>(&message[19]));
+        
+        // Parse client IP from bytes 23-26 (adjusted for removed command byte)  
+        uint32_t clientIP = *reinterpret_cast<const uint32_t*>(&message[23]);
+        
+        // Set up test client address
+        testClientAddr_.sin_family = AF_INET;
+        testClientAddr_.sin_port = clientPort;  // Already in network order
+        testClientAddr_.sin_addr.s_addr = clientIP;  // Already in network order
+        
+        std::cout << "Request-Session: SID=" << sid_ 
+                  << ", Client=" << inet_ntoa(testClientAddr_.sin_addr) 
+                  << ":" << ntohs(testClientAddr_.sin_port) << std::endl;
+        
+        // Send Accept-Session (28 bytes)
+        std::vector<char> acceptMessage(28, 0);
+        acceptMessage[0] = 3;  // Accept-Session command
+        *reinterpret_cast<uint32_t*>(&acceptMessage[12]) = htonl(sid_);  // Echo back SID
+        acceptMessage[16] = 0;  // Accept (0 means accepted)
+        
+        sendControlMessage(acceptMessage);
+        
+    } catch (const std::exception& e) {
+        std::cerr << "Request-Session error: " << e.what() << std::endl;
+        throw;
+    }
 }
 
 void Session::handleStartSessions() {
-    // Receive Start-Sessions message (12 bytes)
-    auto message = receiveControlMessage(12);
+    std::cout << "Start-Sessions received" << std::endl;
     
     // Send Start-Ack (12 bytes)
     std::vector<char> startAck(12, 0);
@@ -157,11 +170,11 @@ void Session::handleStartSessions() {
     sendControlMessage(startAck);
     
     testActive_ = true;
+    std::cout << "Test session activated" << std::endl;
 }
 
 void Session::handleStopSessions() {
-    // Receive Stop-Sessions message (12 bytes)
-    auto message = receiveControlMessage(12);
+    std::cout << "Stop-Sessions received" << std::endl;
     
     // Send Stop-Ack (12 bytes)
     std::vector<char> stopAck(12, 0);
@@ -170,24 +183,30 @@ void Session::handleStopSessions() {
     sendControlMessage(stopAck);
     
     testActive_ = false;
-}
-
-void Session::handleFetchSession() {
-    // Receive Fetch-Session message (12 bytes)
-    auto message = receiveControlMessage(12);
-    
-    // Send Fetch-Response (36 bytes)
-    std::vector<char> fetchResponse(36, 0);
-    fetchResponse[0] = 10;  // Fetch-Response command
-    
-    // For simplicity, we just return zeros for all statistics
-    sendControlMessage(fetchResponse);
+    std::cout << "Test session stopped" << std::endl;
 }
 
 void Session::sendControlMessage(const std::vector<char>& message) {
     if (send(controlSocket_, message.data(), message.size(), 0) != static_cast<ssize_t>(message.size())) {
         throw std::runtime_error("Failed to send control message");
     }
+}
+
+// Remove unused methods
+void Session::handleSetUpResponse() {
+    // Not used in this implementation
+}
+
+void Session::handleServerStart() {
+    // Not used in this implementation
+}
+
+void Session::handleAcceptSession() {
+    // Not used in this implementation
+}
+
+void Session::handleFetchSession() {
+    // Not used in this implementation
 }
 
 std::vector<char> Session::receiveControlMessage(size_t expectedSize) {
