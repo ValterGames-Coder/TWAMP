@@ -23,23 +23,19 @@ A lightweight implementation of the Two-Way Active Measurement Protocol (TWAMP) 
 #### Debian/Ubuntu
 ```bash
 sudo apt update
-sudo apt install -y build-essential cmake git pkg-config
-sudo apt install -y libsystemd-dev
+sudo apt install -y build-essential cmake git pkg-config libsystemd-dev
 ```
 
 #### Fedora/RHEL/CentOS
 ```bash
 # Fedora
-sudo dnf install -y gcc gcc-c++ cmake git pkg-config
-sudo dnf install -y systemd-devel
+sudo dnf install -y gcc gcc-c++ cmake git pkg-config systemd-devel
 
 # RHEL/CentOS 7
-sudo yum install -y gcc gcc-c++ cmake3 git pkg-config
-sudo yum install -y systemd-devel
+sudo yum install -y gcc gcc-c++ cmake3 git pkg-config systemd-devel
 
 # RHEL/CentOS 8+
-sudo dnf install -y gcc gcc-c++ cmake git pkg-config
-sudo dnf install -y systemd-devel
+sudo dnf install -y gcc gcc-c++ cmake git pkg-config systemd-devel
 ```
 
 ## Installation
