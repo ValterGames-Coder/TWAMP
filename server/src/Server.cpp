@@ -89,6 +89,11 @@ void Server::stop()
         }
     }
 
+    // Join main threads first
+    if (controlThread_.joinable()) controlThread_.join();
+    if (testThread_.joinable()) testThread_.join();
+    if (cleanupThread_.joinable()) cleanupThread_.join();
+
     // Join control connection threads
     std::vector<std::thread> controlThreads;
     {
@@ -115,14 +120,8 @@ void Server::stop()
         activeSessions_.clear();
     }
 
-    // Join main threads
-    if (controlThread_.joinable()) controlThread_.join();
-    if (testThread_.joinable()) testThread_.join();
-    if (cleanupThread_.joinable()) cleanupThread_.join();
-
     std::cout << "TWAMP server stopped." << std::endl;
 }
-
 
 bool Server::setupControlSocket()
 {
@@ -334,7 +333,7 @@ void Server::sessionCleanupThread()
 {
     while (running_)
     {
-        for (int i = 0; i < 10; ++i) {
+        for (int i = 0; i < 10 && running_; ++i) {
             std::this_thread::sleep_for(std::chrono::seconds(1));
         }
         
@@ -364,15 +363,8 @@ void Server::handleControlConnection(int clientSocket)
         // Send server greeting first
         std::vector<char> serverGreeting(12, 0);
         serverGreeting[3] = 1; // Mode 1 (unauthenticated)
-        int flags = fcntl(clientSocket, F_GETFL, 0);
-        if (flags != -1) fcntl(clientSocket, F_SETFL, flags & ~O_NONBLOCK);
 
         // Add server identifier (random number)
-        struct timeval tv;
-        tv.tv_sec = 1;
-        tv.tv_usec = 0;
-        setsockopt(clientSocket, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-        
         std::random_device rd;
         std::mt19937 gen(rd());
         std::uniform_int_distribution<uint32_t> dis;
@@ -400,11 +392,6 @@ void Server::handleControlConnection(int clientSocket)
             }
             totalReceived += n;
         }
-        if (recv(clientSocket, clientGreeting.data(), clientGreeting.size(), MSG_WAITALL) !=
-            static_cast<ssize_t>(clientGreeting.size()))
-        {
-            throw std::runtime_error("Failed to receive client greeting");
-        }
 
         // Check client mode
         if (clientGreeting[3] != 1)
@@ -423,14 +410,16 @@ void Server::handleControlConnection(int clientSocket)
         }
 
         // Run session (this will block until session ends)
-        std::lock_guard<std::mutex> lock(sessionThreadsMutex_);
-        sessionThreads_.emplace_back([session]() {
-            try {
-                session->run();
-            } catch (const std::exception &e) {
-                std::cerr << "Session run error: " << e.what() << std::endl;
-            }
-        });
+        {
+            std::lock_guard<std::mutex> lock(sessionThreadsMutex_);
+            sessionThreads_.emplace_back([session]() {
+                try {
+                    session->run();
+                } catch (const std::exception &e) {
+                    std::cerr << "Session run error: " << e.what() << std::endl;
+                }
+            });
+        }
     }
     catch (const std::exception &e)
     {

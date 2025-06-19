@@ -69,13 +69,11 @@ int main(int argc, char* argv[]) {
             std::cout << "Cleanup complete, exiting..." << std::endl;
         }
         
-        // Force exit to avoid any lingering issues
-        _exit(EXIT_SUCCESS);
+        // Normal exit instead of _exit to allow proper cleanup
+        return EXIT_SUCCESS;
         
     } catch (const std::exception& e) {
         std::cerr << "Error: " << e.what() << std::endl;
         return EXIT_FAILURE;
     }
-    
-    return EXIT_SUCCESS;
 }
