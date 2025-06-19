@@ -56,7 +56,6 @@ cd TWAMP
    cd server
    mkdir build && cd build
    cmake ..
-   make
    sudo make install
    sudo systemctl start twamp-server.service
    sudo systemctl status twamp-server.service
