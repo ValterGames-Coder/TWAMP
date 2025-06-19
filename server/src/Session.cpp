@@ -11,6 +11,7 @@ Session::Session(int controlSocket, int testSocket)
     lastActivity_ = std::chrono::steady_clock::now();
     sid_ = 0;
     memset(&testClientAddr_, 0, sizeof(testClientAddr_));
+    stopRequested_ = false;
 }
 
 Session::~Session() {
@@ -19,9 +20,18 @@ Session::~Session() {
     }
 }
 
+void Session::requestStop() {
+    stopRequested_ = true;
+    if (controlSocket_ != -1) {
+        shutdown(controlSocket_, SHUT_RDWR); // Прервёт recv
+        close(controlSocket_);
+        controlSocket_ = -1;
+    }
+}
+
 void Session::run() {
     try {
-        while (true) {
+        while (!stopRequested_) {
             // Read the first byte to determine message type and size
             char firstByte;
             ssize_t received = recv(controlSocket_, &firstByte, 1, 0);

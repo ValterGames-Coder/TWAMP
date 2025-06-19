@@ -12,6 +12,8 @@
 #include <chrono>
 #include <random>
 #include <csignal>
+#include <fcntl.h>
+#include <errno.h>
 
 Server *Server::instance = nullptr;
 
@@ -20,20 +22,11 @@ void Server::signalHandler(int signum)
     if (Server::instance)
     {
         std::cerr << "Received signal " << signum << ", initiating shutdown..." << std::endl;
-        Server::instance->running_ = false;
-
-        if (Server::instance->controlSocket_ != -1)
-        {
-            shutdown(Server::instance->controlSocket_, SHUT_RDWR);
-        }
-        if (Server::instance->testSocket_ != -1)
-        {
-            shutdown(Server::instance->testSocket_, SHUT_RDWR);
-        }
+        Server::instance->stop();
     }
 }
 
-Server::Server(const std::string &configFile) : config_(configFile), running_(false)
+Server::Server(const std::string &configFile) : config_(configFile), running_(false), controlSocket_(-1), testSocket_(-1)
 {
     if (!config_.load())
     {
@@ -71,38 +64,65 @@ bool Server::start()
 
 void Server::stop()
 {
+    if (!running_) return;
     running_ = false;
 
-    if (controlSocket_ != -1)
-    {
+    std::cout << "Stopping TWAMP server..." << std::endl;
+
+    // Close sockets to unblock threads
+    if (controlSocket_ != -1) {
         shutdown(controlSocket_, SHUT_RDWR);
         close(controlSocket_);
+        controlSocket_ = -1;
     }
-
-    if (testSocket_ != -1)
-    {
+    if (testSocket_ != -1) {
         shutdown(testSocket_, SHUT_RDWR);
         close(testSocket_);
+        testSocket_ = -1;
     }
 
-    if (controlThread_.joinable())
+    // Stop all sessions
     {
-        controlThread_.join();
+        std::lock_guard<std::mutex> lock(sessionsMutex_);
+        for (auto &session : activeSessions_) {
+            session->requestStop();
+        }
     }
 
-    if (testThread_.joinable())
+    // Join control connection threads
+    std::vector<std::thread> controlThreads;
     {
-        testThread_.join();
+        std::lock_guard<std::mutex> lock(controlConnectionThreadsMutex_);
+        controlThreads = std::move(controlConnectionThreads_);
+        controlConnectionThreads_.clear();
+    }
+    for (auto& thread : controlThreads) {
+        if (thread.joinable()) thread.join();
     }
 
-    if (cleanupThread_.joinable())
+    // Join session threads
     {
-        cleanupThread_.join();
+        std::lock_guard<std::mutex> lock(sessionThreadsMutex_);
+        for (auto& thread : sessionThreads_) {
+            if (thread.joinable()) thread.join();
+        }
+        sessionThreads_.clear();
     }
 
-    std::lock_guard<std::mutex> lock(sessionsMutex_);
-    activeSessions_.clear();
+    // Clear sessions
+    {
+        std::lock_guard<std::mutex> lock(sessionsMutex_);
+        activeSessions_.clear();
+    }
+
+    // Join main threads
+    if (controlThread_.joinable()) controlThread_.join();
+    if (testThread_.joinable()) testThread_.join();
+    if (cleanupThread_.joinable()) cleanupThread_.join();
+
+    std::cout << "TWAMP server stopped." << std::endl;
 }
+
 
 bool Server::setupControlSocket()
 {
@@ -117,6 +137,18 @@ bool Server::setupControlSocket()
     if (setsockopt(controlSocket_, SOL_SOCKET, SO_REUSEADDR, &enable, sizeof(enable)) < 0)
     {
         std::cerr << "Failed to set SO_REUSEADDR on control socket" << std::endl;
+        close(controlSocket_);
+        controlSocket_ = -1;
+        return false;
+    }
+
+    // Set socket to non-blocking mode to handle shutdown better
+    int flags = fcntl(controlSocket_, F_GETFL, 0);
+    if (flags == -1 || fcntl(controlSocket_, F_SETFL, flags | O_NONBLOCK) == -1)
+    {
+        std::cerr << "Failed to set control socket to non-blocking" << std::endl;
+        close(controlSocket_);
+        controlSocket_ = -1;
         return false;
     }
 
@@ -127,13 +159,17 @@ bool Server::setupControlSocket()
 
     if (bind(controlSocket_, (struct sockaddr *)&controlAddr_, sizeof(controlAddr_)) < 0)
     {
-        std::cerr << "Failed to bind control socket" << std::endl;
+        std::cerr << "Failed to bind control socket: " << strerror(errno) << std::endl;
+        close(controlSocket_);
+        controlSocket_ = -1;
         return false;
     }
 
     if (listen(controlSocket_, 10) < 0)
     {
-        std::cerr << "Failed to listen on control socket" << std::endl;
+        std::cerr << "Failed to listen on control socket: " << strerror(errno) << std::endl;
+        close(controlSocket_);
+        controlSocket_ = -1;
         return false;
     }
 
@@ -149,6 +185,16 @@ bool Server::setupTestSocket()
         return false;
     }
 
+    // Set socket to non-blocking mode
+    int flags = fcntl(testSocket_, F_GETFL, 0);
+    if (flags == -1 || fcntl(testSocket_, F_SETFL, flags | O_NONBLOCK) == -1)
+    {
+        std::cerr << "Failed to set test socket to non-blocking" << std::endl;
+        close(testSocket_);
+        testSocket_ = -1;
+        return false;
+    }
+
     memset(&testAddr_, 0, sizeof(testAddr_));
     testAddr_.sin_family = AF_INET;
     testAddr_.sin_addr.s_addr = htonl(INADDR_ANY);
@@ -156,7 +202,9 @@ bool Server::setupTestSocket()
 
     if (bind(testSocket_, (struct sockaddr *)&testAddr_, sizeof(testAddr_)) < 0)
     {
-        std::cerr << "Failed to bind test socket" << std::endl;
+        std::cerr << "Failed to bind test socket: " << strerror(errno) << std::endl;
+        close(testSocket_);
+        testSocket_ = -1;
         return false;
     }
 
@@ -167,23 +215,57 @@ void Server::controlServerThread()
 {
     while (running_)
     {
-        struct sockaddr_in clientAddr;
-        socklen_t clientAddrLen = sizeof(clientAddr);
-        int clientSocket = accept(controlSocket_, (struct sockaddr *)&clientAddr, &clientAddrLen);
-
-        if (clientSocket < 0)
+        fd_set readfds;
+        FD_ZERO(&readfds);
+        FD_SET(controlSocket_, &readfds);
+        
+        struct timeval timeout;
+        timeout.tv_sec = 1;
+        timeout.tv_usec = 0;
+        
+        int activity = select(controlSocket_ + 1, &readfds, NULL, NULL, &timeout);
+        
+        if (!running_) break;
+        
+        if (activity < 0)
         {
-            if (running_)
-            {
-                if (errno == EINTR)
-                    continue; // Interrupted by signal, retry
-                std::cerr << "Failed to accept control connection: " << strerror(errno) << std::endl;
-            }
-            continue;
+            if (errno == EINTR) continue;
+            std::cerr << "Select error on control socket: " << strerror(errno) << std::endl;
+            break;
         }
+        
+        if (activity == 0) continue; // Timeout
+        
+        if (FD_ISSET(controlSocket_, &readfds))
+        {
+            struct sockaddr_in clientAddr;
+            socklen_t clientAddrLen = sizeof(clientAddr);
+            int clientSocket = accept(controlSocket_, (struct sockaddr *)&clientAddr, &clientAddrLen);
 
-        std::cout << "New control connection from " << inet_ntoa(clientAddr.sin_addr) << std::endl;
-        std::thread(&Server::handleControlConnection, this, clientSocket).detach();
+            if (clientSocket < 0)
+            {
+                if (errno == EAGAIN || errno == EWOULDBLOCK) continue;
+                if (errno == EINTR) continue;
+                if (running_)
+                {
+                    std::cerr << "Failed to accept control connection: " << strerror(errno) << std::endl;
+                }
+                continue;
+            }
+
+            // Set client socket back to blocking mode for session handling
+            int flags = fcntl(clientSocket, F_GETFL, 0);
+            if (flags != -1) {
+                fcntl(clientSocket, F_SETFL, flags & ~O_NONBLOCK);
+            }
+
+            std::cout << "New control connection from " << inet_ntoa(clientAddr.sin_addr) << std::endl;
+            std::thread t(&Server::handleControlConnection, this, clientSocket);
+            {
+                std::lock_guard<std::mutex> lock(controlConnectionThreadsMutex_);
+                controlConnectionThreads_.push_back(std::move(t));
+            }
+        }
     }
 }
 
@@ -194,31 +276,55 @@ void Server::testServerThread()
 
     while (running_)
     {
-        struct sockaddr_in clientAddr;
-        socklen_t clientAddrLen = sizeof(clientAddr);
-
-        ssize_t bytesRead = recvfrom(testSocket_, buffer, bufferSize, 0,
-                                     (struct sockaddr *)&clientAddr, &clientAddrLen);
-
-        if (bytesRead < 0)
+        fd_set readfds;
+        FD_ZERO(&readfds);
+        FD_SET(testSocket_, &readfds);
+        
+        struct timeval timeout;
+        timeout.tv_sec = 1;
+        timeout.tv_usec = 0;
+        
+        int activity = select(testSocket_ + 1, &readfds, NULL, NULL, &timeout);
+        
+        if (!running_) break;
+        
+        if (activity < 0)
         {
-            if (running_)
-            {
-                if (errno == EINTR)
-                    continue;
-                std::cerr << "Failed to receive test packet: " << strerror(errno) << std::endl;
-            }
-            continue;
+            if (errno == EINTR) continue;
+            std::cerr << "Select error on test socket: " << strerror(errno) << std::endl;
+            break;
         }
-
-        // Process test packet
-        std::lock_guard<std::mutex> lock(sessionsMutex_);
-        for (auto &session : activeSessions_)
+        
+        if (activity == 0) continue; // Timeout
+        
+        if (FD_ISSET(testSocket_, &readfds))
         {
-            if (session->matchesTestAddress(clientAddr))
+            struct sockaddr_in clientAddr;
+            socklen_t clientAddrLen = sizeof(clientAddr);
+
+            ssize_t bytesRead = recvfrom(testSocket_, buffer, bufferSize, 0,
+                                         (struct sockaddr *)&clientAddr, &clientAddrLen);
+
+            if (bytesRead < 0)
             {
-                session->processTestPacket(buffer, bytesRead, clientAddr);
-                break;
+                if (errno == EAGAIN || errno == EWOULDBLOCK) continue;
+                if (errno == EINTR) continue;
+                if (running_)
+                {
+                    std::cerr << "Failed to receive test packet: " << strerror(errno) << std::endl;
+                }
+                continue;
+            }
+
+            // Process test packet
+            std::lock_guard<std::mutex> lock(sessionsMutex_);
+            for (auto &session : activeSessions_)
+            {
+                if (session->matchesTestAddress(clientAddr))
+                {
+                    session->processTestPacket(buffer, bytesRead, clientAddr);
+                    break;
+                }
             }
         }
     }
@@ -228,7 +334,11 @@ void Server::sessionCleanupThread()
 {
     while (running_)
     {
-        std::this_thread::sleep_for(std::chrono::seconds(10));
+        for (int i = 0; i < 10; ++i) {
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+        }
+        
+        if (!running_) break;
 
         std::lock_guard<std::mutex> lock(sessionsMutex_);
         auto it = activeSessions_.begin();
@@ -254,8 +364,15 @@ void Server::handleControlConnection(int clientSocket)
         // Send server greeting first
         std::vector<char> serverGreeting(12, 0);
         serverGreeting[3] = 1; // Mode 1 (unauthenticated)
+        int flags = fcntl(clientSocket, F_GETFL, 0);
+        if (flags != -1) fcntl(clientSocket, F_SETFL, flags & ~O_NONBLOCK);
 
         // Add server identifier (random number)
+        struct timeval tv;
+        tv.tv_sec = 1;
+        tv.tv_usec = 0;
+        setsockopt(clientSocket, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+        
         std::random_device rd;
         std::mt19937 gen(rd());
         std::uniform_int_distribution<uint32_t> dis;
@@ -270,6 +387,19 @@ void Server::handleControlConnection(int clientSocket)
 
         // Receive client greeting
         std::vector<char> clientGreeting(12);
+        ssize_t totalReceived = 0;
+        while (totalReceived < 12) {
+            ssize_t n = recv(clientSocket, clientGreeting.data() + totalReceived, 
+                            12 - totalReceived, 0);
+            if (n == 0) throw std::runtime_error("Client disconnected");
+            if (n < 0) {
+                if (errno == EINTR) continue;
+                if (errno == EAGAIN || errno == EWOULDBLOCK) 
+                    throw std::runtime_error("Client greeting timeout");
+                throw std::runtime_error(strerror(errno));
+            }
+            totalReceived += n;
+        }
         if (recv(clientSocket, clientGreeting.data(), clientGreeting.size(), MSG_WAITALL) !=
             static_cast<ssize_t>(clientGreeting.size()))
         {
@@ -293,7 +423,14 @@ void Server::handleControlConnection(int clientSocket)
         }
 
         // Run session (this will block until session ends)
-        session->run();
+        std::lock_guard<std::mutex> lock(sessionThreadsMutex_);
+        sessionThreads_.emplace_back([session]() {
+            try {
+                session->run();
+            } catch (const std::exception &e) {
+                std::cerr << "Session run error: " << e.what() << std::endl;
+            }
+        });
     }
     catch (const std::exception &e)
     {

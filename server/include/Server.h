@@ -22,6 +22,9 @@ public:
     void stop();
     
 private:
+    std::vector<std::thread> controlConnectionThreads_;
+    std::mutex controlConnectionThreadsMutex_;
+    
     static void signalHandler(int signum);
     void controlServerThread();
     void testServerThread();
@@ -40,6 +43,8 @@ private:
     
     std::mutex sessionsMutex_;
     std::vector<std::shared_ptr<Session>> activeSessions_;
+    std::vector<std::thread> sessionThreads_;
+    std::mutex sessionThreadsMutex_;
     
     struct sockaddr_in controlAddr_;
     struct sockaddr_in testAddr_;

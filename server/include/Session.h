@@ -7,6 +7,7 @@
 #include <memory>
 #include <ctime>
 #include <sys/time.h>
+#include <atomic>
 
 class Session {
 public:
@@ -14,6 +15,7 @@ public:
     ~Session();
     
     void run();
+    void requestStop();
     bool isExpired() const;
     bool matchesTestAddress(const struct sockaddr_in& addr) const;
     void processTestPacket(const char* data, size_t size, const struct sockaddr_in& fromAddr);
@@ -23,6 +25,7 @@ private:
     void handleStartSessions();
     void handleStopSessions();
     
+    std::atomic<bool> stopRequested_;
     int controlSocket_;
     int testSocket_;
     std::chrono::steady_clock::time_point lastActivity_;
