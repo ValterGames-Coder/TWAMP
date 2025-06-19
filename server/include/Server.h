@@ -14,6 +14,7 @@ class Session;
 
 class Server {
 public:
+    static Server* instance;
     Server(const std::string& configFile);
     ~Server();
     
@@ -21,6 +22,7 @@ public:
     void stop();
     
 private:
+    static void signalHandler(int signum);
     void controlServerThread();
     void testServerThread();
     void sessionCleanupThread();

@@ -11,6 +11,9 @@ User=root
 ExecStart=/usr/local/bin/twamp-server --foreground
 StandardOutput=journal
 StandardError=journal
+KillSignal=SIGINT
+SendSIGKILL=yes
+TimeoutStopSec=10
 
 [Install]
 WantedBy=multi-user.target

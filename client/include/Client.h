@@ -7,12 +7,13 @@
 
 class Client {
 public:
-    Client(const std::string& serverAddress, int controlPort, int testPort);
+    Client(const std::string& serverAddress, int controlPort, int testPort, bool shortOutput = false);
     ~Client();
     
     bool runTest(int packetCount, int intervalMs);
     
 private:
+    bool shortOutput_;
     std::string serverAddress_;
     int controlPort_;
     int testPort_;
