@@ -4,7 +4,7 @@ A lightweight implementation of the Two-Way Active Measurement Protocol (TWAMP) 
 
 ## Features
 
-- **RFC 5357 Compliant**: Full implementation of TWAMP as specified in RFC 5357
+- **RFC 5357 Compliant**: Full implementation of TWAMP as specified
 - **Bidirectional Measurements**: Accurate round-trip time and one-way delay measurements
 - **Low Overhead**: Minimal system resource usage for continuous monitoring
 - **Systemd Integration**: Easy service management with systemd
