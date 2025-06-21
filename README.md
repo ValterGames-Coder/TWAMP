@@ -30,14 +30,11 @@ sudo apt install -y build-essential cmake git pkg-config libsystemd-dev
 #### Fedora/RHEL/CentOS
 
 ```bash
-# Fedora
+# Fedora / RHEL / CentOS 8+
 sudo dnf install -y gcc gcc-c++ cmake git pkg-config systemd-devel
 
-# RHEL/CentOS 7
+# RHEL / CentOS 7
 sudo yum install -y gcc gcc-c++ cmake3 git pkg-config systemd-devel
-
-# RHEL/CentOS 8+
-sudo dnf install -y gcc gcc-c++ cmake git pkg-config systemd-devel
 ```
 
 ## Installation
