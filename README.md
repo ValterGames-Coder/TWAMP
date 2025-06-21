@@ -21,12 +21,14 @@ A lightweight implementation of the Two-Way Active Measurement Protocol (TWAMP) 
 ### Development Dependencies
 
 #### Debian/Ubuntu
+
 ```bash
 sudo apt update
 sudo apt install -y build-essential cmake git pkg-config libsystemd-dev
 ```
 
 #### Fedora/RHEL/CentOS
+
 ```bash
 # Fedora
 sudo dnf install -y gcc gcc-c++ cmake git pkg-config systemd-devel
@@ -40,13 +42,16 @@ sudo dnf install -y gcc gcc-c++ cmake git pkg-config systemd-devel
 
 ## Installation
 
-### Clone the Repository
+### Download the RPM/DEB packages from the [Releases page](https://github.com/ValterGames-Coder/TWAMP/releases):
+
+### Or build:
+
 ```bash
 git clone https://github.com/ValterGames-Coder/TWAMP.git
 cd TWAMP
 ```
 
-### Server Installation
+#### Server Installation
 
    ```bash
    cd server
@@ -57,7 +62,7 @@ cd TWAMP
    sudo systemctl status twamp-server.service
    ```
 
-### Client Installation
+#### Client Installation
 
    ```bash
    cd client
