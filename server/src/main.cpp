@@ -43,7 +43,7 @@ int main(int argc, char* argv[]) {
     signal(SIGPIPE, SIG_IGN); // Ignore broken pipe signals
     
     try {
-        server = std::make_unique<Server>("/usr/local/etc/twamp-server/twamp-server.conf");
+        server = std::make_unique<Server>("/etc/twamp-server/twamp-server.conf");
         if (!server->start()) {
             std::cerr << "Failed to start TWAMP server" << std::endl;
             return EXIT_FAILURE;

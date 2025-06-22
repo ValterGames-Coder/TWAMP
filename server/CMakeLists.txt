@@ -18,17 +18,17 @@ add_executable(twamp-server
 target_link_libraries(twamp-server PRIVATE Threads::Threads)
 
 # Установка бинарника
-install(TARGETS twamp-server DESTINATION /usr/local/bin)
+install(TARGETS twamp-server DESTINATION /usr/bin)
 
 # Установка конфига
-install(FILES twamp-server.conf DESTINATION /usr/local/etc/twamp-server)
+install(FILES twamp-server.conf DESTINATION /etc/twamp-server)
 
 # Установка systemd unit
 install(FILES twamp-server.service DESTINATION /etc/systemd/system)
 
 # Post-install скрипт
 install(CODE "
-    execute_process(COMMAND mkdir -p /usr/local/etc/twamp-server)
+    execute_process(COMMAND mkdir -p /etc/twamp-server)
     execute_process(COMMAND systemctl daemon-reload)
     execute_process(COMMAND systemctl enable twamp-server)
     " COMPONENT runtime)
