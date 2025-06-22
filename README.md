@@ -4,7 +4,7 @@ A lightweight implementation of the Two-Way Active Measurement Protocol (TWAMP) 
 
 ## Features
 
-- **RFC 5357 Compliant**: Full implementation of TWAMP as specified in RFC 5357
+- **RFC 5357 Compliant**: Full implementation of TWAMP as specified
 - **Bidirectional Measurements**: Accurate round-trip time and one-way delay measurements
 - **Low Overhead**: Minimal system resource usage for continuous monitoring
 - **Systemd Integration**: Easy service management with systemd
@@ -21,32 +21,34 @@ A lightweight implementation of the Two-Way Active Measurement Protocol (TWAMP) 
 ### Development Dependencies
 
 #### Debian/Ubuntu
+
 ```bash
 sudo apt update
 sudo apt install -y build-essential cmake git pkg-config libsystemd-dev
 ```
 
 #### Fedora/RHEL/CentOS
+
 ```bash
-# Fedora
+# Fedora / RHEL / CentOS 8+
 sudo dnf install -y gcc gcc-c++ cmake git pkg-config systemd-devel
 
-# RHEL/CentOS 7
+# RHEL / CentOS 7
 sudo yum install -y gcc gcc-c++ cmake3 git pkg-config systemd-devel
-
-# RHEL/CentOS 8+
-sudo dnf install -y gcc gcc-c++ cmake git pkg-config systemd-devel
 ```
 
 ## Installation
 
-### Clone the Repository
+### Download the RPM/DEB packages from the [Releases page](https://github.com/ValterGames-Coder/TWAMP/releases):
+
+### Or build:
+
 ```bash
 git clone https://github.com/ValterGames-Coder/TWAMP.git
 cd TWAMP
 ```
 
-### Server Installation
+#### Server Installation
 
    ```bash
    cd server
@@ -57,7 +59,7 @@ cd TWAMP
    sudo systemctl status twamp-server.service
    ```
 
-### Client Installation
+#### Client Installation
 
    ```bash
    cd client
