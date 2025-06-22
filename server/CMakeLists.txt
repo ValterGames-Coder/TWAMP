@@ -24,7 +24,7 @@ install(TARGETS twamp-server DESTINATION /usr/bin)
 install(FILES twamp-server.conf DESTINATION /etc/twamp-server)
 
 # Установка systemd unit
-install(FILES twamp-server.service DESTINATION /etc/systemd/system)
+install(FILES twamp-server.service DESTINATION /usr/lib/systemd/system/)
 
 # Post-install скрипт
 install(CODE "

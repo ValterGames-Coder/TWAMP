@@ -129,13 +129,14 @@ std::vector<char> Session::generateReflectorPacket(const char* data, size_t size
     if (size >= 64) {  // Standard TWAMP test packet size
         // Get current time in NTP format
         auto now = std::chrono::system_clock::now();
-        auto since_epoch = now.time_since_epoch();
-        auto seconds = std::chrono::duration_cast<std::chrono::seconds>(since_epoch);
-        auto microseconds = std::chrono::duration_cast<std::chrono::microseconds>(since_epoch - seconds);
-        
-        uint32_t secs = htonl(static_cast<uint32_t>(seconds.count() + 2208988800UL));  // NTP epoch
-        uint32_t frac = htonl(static_cast<uint32_t>((microseconds.count() << 32) / 1000000));
-        
+        auto duration = now.time_since_epoch();
+        auto seconds = std::chrono::duration_cast<std::chrono::seconds>(duration).count();
+        auto nanoseconds = std::chrono::duration_cast<std::chrono::nanoseconds>(duration).count() % 1'000'000'000ULL;
+
+        // Переводим в NTP-время: 32 бита секунд и 32 бита дробной части
+        uint32_t secs = htonl(static_cast<uint32_t>(seconds + 2208988800ULL));
+        uint32_t frac = htonl(static_cast<uint32_t>((nanoseconds * (1LL << 32)) / 1'000'000'000ULL));
+
         // Receive timestamp (bytes 16-23) - when we received the packet
         memcpy(&packet[16], &secs, 4);
         memcpy(&packet[20], &frac, 4);
