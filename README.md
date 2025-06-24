@@ -16,6 +16,8 @@ A lightweight implementation of the Two-Way Active Measurement Protocol (TWAMP) 
 - Network connectivity for measurements
 - **Time synchronization enabled** (NTP/chrony) for accurate measurements
 
+Tested on: Fedora 41, Ubuntu 22.04, Ubuntu 24.04
+
 ### Development Dependencies
 #### Debian/Ubuntu
 ```bash
