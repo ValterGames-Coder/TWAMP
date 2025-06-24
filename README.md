@@ -172,6 +172,12 @@ sudo journalctl -u twamp-server.service -f
 ```
 
 ### Client Usage
+
+⚠️ **Recommended intervals:**
+- Minimum safe interval: 100ms (`-i 100`)
+- For accurate measurements: 500-1000ms
+- Avoid intervals below 50ms as they may cause timestamp synchronization issues
+
 **Basic measurement:**
 ```bash
 twamp-client <server_ip>:<port>
